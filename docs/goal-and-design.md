@@ -93,13 +93,22 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 
 先定 `Message` / `ContentBlock` / `Completion` 的形状，再写逻辑。原因：agent 的 bug 八成出在数据结构上——工具结果和调用对不上号、历史里塞了半截 JSON、重试时把已发出的消息改脏。
 
-### 4.2 内部消息模型与厂商格式分离
+### 4.2 内部消息模型直接对齐 OpenAI
 
-内部只认三种内容块：`TextBlock`、`ToolUseBlock`、`ToolResultBlock`。
+> 2026-11-18 修订：原方案是"厂商中立"（选 Anthropic 形态、把 OpenAI 差异推到适配器）。
+> 后来判定：实际要接的是 DeepSeek / Kimi / vLLM 这类 **OpenAI 兼容服务**，
+> 内部的"中立形态"等于凭空多一层翻译，每种翻译都是一类 bug 的来源。
+> 于是改为内部直接说 OpenAI 的话，代价是以后接 Anthropic 要写反向适配器。
 
-厂商差异（OpenAI 要求工具结果独立成 `role="tool"` 消息，Anthropic 把它放进 `user` 消息的 block 里）一律由适配器翻译，**不许泄漏到主循环**。
+内部只认三种内容块：`TextBlock`、`ToolCallBlock`、`ToolResultBlock`，且形态就是 OpenAI 的：
 
-换来的是：换模型厂商只改一个文件。
+- 角色 `system` / `user` / `assistant` / `tool`
+- 工具调用是 `tool_calls`，参数 `arguments` 保留 JSON 字符串原文
+- 一条工具结果 = 一条 `role="tool"` 消息（批量构造时 `Message.tool_results` 返回元组）
+- `Usage.cached_input_tokens` 对应 `prompt_tokens_details.cached_tokens`
+
+`StopReason` 仍用语义名（`end_turn` / `tool_use` / `max_tokens` / `refusal`），
+但映射表写死在 `types.py` 的文档字符串里：`stop` / `tool_calls` / `length` / `content_filter`。
 
 ### 4.3 过程（Event）与结果（Message）分离
 

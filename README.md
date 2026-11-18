@@ -55,7 +55,7 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 | M4 | 上下文压缩、权限、持久化、CLI | ⬜ |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
-已完成：`agentlab/types.py`（数据契约）。
+已完成：`agentlab/types.py`（数据契约，OpenAI 格式）、`agentlab/llm/base.py`（错误分类 + 客户端契约）。
 详见 [docs/progress.md](docs/progress.md)。
 
 ## 快速开始
@@ -77,6 +77,7 @@ python -c "import agentlab; print(agentlab.__version__)"
 
 - [目标与实现方式](docs/goal-and-design.md) —— 定位、架构、10 条设计决策、里程碑
 - [当前进展](docs/progress.md) —— 到哪一步了、下一步做什么、变更记录
+- [协作约定](docs/working-agreement.md) —— 怎么讲新生成的文件、怎么控复杂度、提交规范
 
 ## 技术栈
 

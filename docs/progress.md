@@ -1,6 +1,6 @@
 # MyAgent · 当前进展
 
-> 最后更新：2026-11-17
+> 最后更新：2026-11-18
 > 文档目的：记录"现在到哪一步了"，方便随时中断、随时接上。
 
 ---
@@ -10,14 +10,14 @@
 | 项 | 值 |
 |---|---|
 | 当前阶段 | **M1 地基**（进行中） |
-| 已完成文件 | 2 个（`__init__.py`、`types.py`） |
-| 可运行能力 | 能构造消息对象；**还不能和模型对话** |
+| 已完成文件 | 4 个（`agentlab/__init__.py`、`types.py`、`llm/__init__.py`、`llm/base.py`） |
+| 可运行能力 | 能构造 OpenAI 格式的消息；能用假客户端跑通 `LLMClient` 契约；**还不能发真实请求** |
 | 测试 | 0 个（测试要等主链路成形后再补） |
-| 代码规模 | 约 220 行 |
+| 代码规模 | 约 360 行 |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / pytest / ruff / mypy） |
 
-一句话：**地基打完了第一块砖，chat 能力还没接上。**
+一句话：**地基和接口都定好了，还差一次真的网络请求。**
 
 ---
 
@@ -27,9 +27,13 @@
 MyAgent/
 ├── agentlab/               ← Python 包
 │   ├── __init__.py         ← 只声明版本号
-│   └── types.py            ← ✅ 数据契约
+│   ├── types.py            ← ✅ 数据契约（OpenAI 格式）
+│   └── llm/                ← 模型适配层
+│       ├── __init__.py     ← ✅ 导出契约
+│       └── base.py         ← ✅ 错误分类 + LLMClient 接口
 ├── docs/
 │   ├── goal-and-design.md  ← 目标与实现方式
+│   ├── working-agreement.md← 协作约定（怎么写、怎么讲）
 │   └── progress.md         ← 本文档
 ├── .env.example            ← 配置模板
 ├── .gitignore
@@ -104,13 +108,45 @@ user
 - 缓存命中——`Usage.cached_input_tokens` 单独记，因为价格差一个数量级；
   它**包含在** `input_tokens` 内，`uncached_input_tokens` 是全价部分
 
+### 3.4 `agentlab/llm/base.py`（文件 2 / 约 180 行）
+
+**职责**：定"主循环怎么跟模型说话"的规矩。不碰网络、不拼 JSON。
+
+| 类型 | 作用 |
+|---|---|
+| `LLMError` | 所有调用失败的根；`retryable` 是类属性，不是实例字段 |
+| `AuthError` | 401 / 403，不重试 |
+| `BadRequestError` | 400 / 404 / 422，不重试，责任在我们（翻译错了） |
+| `RateLimitError` | 429，可重试，带 `retry_after` |
+| `ServerError` | 5xx，可重试 |
+| `NetworkError` | 连不上 / 超时，可重试 |
+| `ResponseFormatError` | HTTP 200 但 body 形状不对，不重试 |
+| `error_from_status()` | 状态码 → 异常，集中在一处，避免各适配器分类不一致 |
+| `LLMClient` | 抽象基类，只有 `model` + `complete(messages, tools)` |
+
+验证（不联网跑通契约）：
+
+```bash
+$ .venv/bin/python -c "from agentlab.llm import LLMClient; LLMClient()"
+TypeError: Can't instantiate abstract class LLMClient without an implementation for abstract methods 'complete', 'model'
+```
+
+设计要点：
+
+- 错误消息里带处置建议（"检查 AGENTLAB_API_KEY"），光说"鉴权失败"等于把排查推给用户
+- 响应体截断 300 字符并压成一行——5xx 常回整页 HTML
+- `ResponseFormatError` 专治"HTTP 200 但结构不对"：这种错不进任何 `except`，
+  会在下游炸成和真因无关的 `AttributeError`
+- 用 `ABC` 不用 `Protocol`：漏实现方法在**实例化时**就报错
+- 有它之后，主循环的测试可以全用假客户端，不需要网络
+
 ---
 
 ## 4. 尚未开始
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | `llm/client.py` 模型客户端 | ⬜ 下一步 |
+| M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ⬜ 下一步 |
 | M2 | `tools/` 工具系统 + 文件工具 | ⬜ |
 | M3 | `loop.py` 主循环 | ⬜ |
 | M4 | `context.py` / `policy.py` / `session.py` / `cli.py` | ⬜ |
@@ -118,20 +154,22 @@ user
 
 ---
 
-## 5. 下一步：`agentlab/client.py`
+## 5. 下一步：`agentlab/llm/openai_compat.py`
 
-**只做一件事**：把消息列表发给模型，拿回一个 `Completion`。
+**只做一件事**：`openai_compat` 实现 `LLMClient`——把消息列表变成 HTTP 请求，把回来的 JSON 变成 `Completion`。
 
 验收标准（全部满足才算完成）：
 
 - [ ] 从环境变量读 `AGENTLAB_BASE_URL` / `AGENTLAB_API_KEY` / `AGENTLAB_MODEL`
-- [ ] 提供 `chat(messages) -> Completion`
-- [ ] **非流式**（流式留到下一步，先让最简单的版本跑通）
-- [ ] 错误分类：401 鉴权失败 / 429 限流 / 5xx 服务端 / 网络错误，各自可区分
+- [ ] `Message` → OpenAI `messages` 数组的翻译（含 `role="tool"`、`tool_calls`）
+- [ ] `ToolSpec` → `tools` 数组（`{"type": "function", "function": {...}}`）
+- [ ] `usage` 解析出 `cached_input_tokens`
+- [ ] `finish_reason` → `StopReason` 映射，未知值有兜底
+- [ ] **非流式**（流式留到下一步）
+- [ ] 错误按 `base.py` 的分类抛，不吞
 - [ ] 函数内部**不打印任何东西**（渲染是 cli 的事）
-- [ ] 无 API key 时用假响应验证逻辑，配好 key 后跑一次真实对话
 
-预计 60-80 行。
+预计 120-150 行。
 
 ---
 
@@ -143,6 +181,19 @@ user
 | 2026-11-17 | **整体推倒重来**：一次性生成太多文件，无法逐个理解；改为"一次一个文件、每个文件现场验证" |
 | 2026-11-17 | 目录结构三次调整，最终定为 `MyAgent/agentlab/` |
 | 2026-11-17 | 重写 `types.py`，import 与对象构造验证通过 |
+| 2026-11-18 | `types.py` 按 **OpenAI 协议**重塑：`Role` 增加 `tool`；`ToolUseBlock` → `ToolCallBlock`、`input` → `arguments`（JSON 字符串）；工具结果改为一条结果一条消息；`Usage` 增加 `cached_input_tokens` |
+| 2026-11-18 | 新增 `agentlab/llm/`：`base.py` 定错误分类与 `LLMClient` 契约，`__init__.py` 导出 |
+| 2026-11-18 | 新增 `docs/working-agreement.md`：把"怎么讲新文件、怎么控复杂度"写成固定约定 |
+| 2026-11-18 | 提交 `a239380`（types + llm 契约 + 文档同步） |
+
+### 2026-11-18 的两条调整
+
+1. **协议方向**：从"厂商中立（Anthropic 形态）"改为**对齐 OpenAI**。理由是实际要接的是
+   DeepSeek / Kimi / vLLM 这类 OpenAI 兼容服务，内部少一层翻译就少一类 bug。
+   代价：以后接 Anthropic 需要反过来写适配器。
+2. **讲解方式**：第一版按行号平铺讲 `types.py`，被判定"过于复杂"。改为
+   "我刚写完递给你"的口吻——先说这文件干什么，再逐个说决定和代价。
+   规则写进 `docs/working-agreement.md`，避免下次重犯。
 
 ### 为什么推倒重来
 
