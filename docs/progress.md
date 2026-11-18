@@ -78,14 +78,14 @@ $ .venv/bin/python -c "import agentlab; print(agentlab.__file__)"
 
 | 类型 | 作用 |
 |---|---|
-| `Role` | `system` / `user` / `assistant` |
+| `Role` | `system` / `user` / `assistant` / `tool`（与 OpenAI 一致） |
 | `StopReason` | `end_turn` / `tool_use` / `max_tokens` / `refusal`，是主循环的**判断依据** |
 | `TextBlock` | 一段文本 |
-| `ToolUseBlock` | 模型要求调用工具（`id` 是配对凭证，必须原样回传） |
-| `ToolResultBlock` | 工具执行结果（`is_error` 是给模型的控制信号） |
-| `Message` | 角色 + 内容块；提供 `system/user/assistant/tool_results` 构造器与 `text/tool_uses/tool_result_blocks` 视图方法 |
-| `ToolSpec` | 给模型看的工具说明书（JSON Schema） |
-| `Usage` | token 账本，支持 `+` 累加 |
+| `ToolCallBlock` | 模型要求调用工具（`id` 是配对凭证；`arguments` 是 JSON **字符串**原文） |
+| `ToolResultBlock` | 工具执行结果（`is_error` 给我们自己看，OpenAI 协议无此字段） |
+| `Message` | 角色 + 内容块；提供 `system/user/assistant/tool/tool_results` 构造器与 `text/tool_calls/tool_result_blocks` 视图方法 |
+| `ToolSpec` | 给模型看的工具说明书，三字段等于 OpenAI 的 `function` 对象 |
+| `Usage` | token 账本：`input/output/cached_input`，支持 `+` 累加 |
 | `Completion` | 一次模型调用的完整结果 |
 
 验证：
@@ -99,7 +99,10 @@ user
 
 - 内容块而不是纯字符串——因为一条 assistant 消息里可以同时有解释和多个工具调用
 - `frozen=True` + `tuple`——历史只追加，禁止回头改已发出的消息
-- 厂商中立——OpenAI 的 `role="tool"` 细节留给适配器
+- **OpenAI 原生**——`role="tool"`、`tool_calls`、`arguments` 用 JSON 字符串，
+  都是协议原样；一条工具结果 = 一条 `role="tool"` 消息（`Message.tool_results` 返回元组）
+- 缓存命中——`Usage.cached_input_tokens` 单独记，因为价格差一个数量级；
+  它**包含在** `input_tokens` 内，`uncached_input_tokens` 是全价部分
 
 ---
 
