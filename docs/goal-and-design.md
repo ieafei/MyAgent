@@ -69,7 +69,7 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| L0 | `types.py` | 数据契约：Message / 三种内容块 / ToolSpec / Usage / Completion |
+| L0 | `types.py` | 数据契约：Message / 三种内容块 / ToolDefinition / Usage / Completion |
 | L0 | `events.py` | 事件流：把"过程"和"结果"分开，UI 与内核解耦 |
 | L1 | `llm/base.py` | 客户端抽象、流式碎片拼装、错误分类、退避策略 |
 | L1 | `llm/openai_compat.py` | OpenAI 兼容协议适配器（DeepSeek / OpenAI / Kimi / vLLM） |
@@ -104,7 +104,7 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 
 - 角色 `system` / `user` / `assistant` / `tool`
 - 工具调用是 `tool_calls`，参数 `arguments` 保留 JSON 字符串原文
-- 一条工具结果 = 一条 `role="tool"` 消息（批量构造时 `Message.tool_results` 返回元组）
+- 一条工具结果 = 一条 `role="tool"` 消息（批量构造时 `Message.from_tool_results` 返回元组）
 - `Usage.cached_input_tokens` 对应 `prompt_tokens_details.cached_tokens`
 
 `StopReason` 仍用语义名（`end_turn` / `tool_use` / `max_tokens` / `refusal`），
@@ -153,6 +153,18 @@ OpenAI 要求每个 `tool_call` 都有对应的 `tool` 响应，缺一个就 400
 ### 4.10 路径收敛是安全底线
 
 `../../etc/passwd`、`/etc/shadow`、指向外部的软链接——所有路径先 `resolve()` 再校验是否在工作区内。这是 agent 的牢笼，不是可选项。
+
+### 4.11 命名：声明用 Definition，转换用 encode/decode
+
+> 2026-11-19 定案，改过一次名。
+
+- 给模型看的工具说明书叫 `ToolDefinition`，不叫 `ToolSpec`——它是**声明**，不能执行；
+  将来可执行的工具叫 `Tool`（`tools/base.py`）。定义与实现成对命名。
+- 适配器的转换函数叫 `encode_messages` / `encode_tools` / `decode_response`，
+  不用 `to_openai_xxx`：源和目标在名字里都看得见，将来 `anthropic_compat` 复用同一套动词。
+- 模型一次调用的完整结果叫 `Completion`，**刻意不改**：它贴着 OpenAI 协议
+  （`/chat/completions`、`completion_tokens`），换成 `ModelResponse` 反而丢掉这层对齐。
+  与 4.2 同源的原则：**协议形态贴近协议，语义判断用自己的词**（如 `StopReason`）。
 
 ---
 

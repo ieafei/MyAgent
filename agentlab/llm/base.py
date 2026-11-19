@@ -23,7 +23,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from agentlab.types import Completion, Message, ToolSpec
+from agentlab.types import Completion, Message, ToolDefinition
 
 # ---------------------------------------------------------------------------
 # 错误分类
@@ -157,7 +157,7 @@ class LLMClient(ABC):
         self,
         messages: Sequence[Message],
         *,
-        tools: Sequence[ToolSpec] = (),
+        tools: Sequence[ToolDefinition] = (),
     ) -> Completion:
         """发一轮对话，拿回完整结果。
 

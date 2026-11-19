@@ -9,15 +9,15 @@
 
 | 项 | 值 |
 |---|---|
-| 当前阶段 | **M1 地基**（进行中） |
-| 已完成文件 | 4 个（`agentlab/__init__.py`、`types.py`、`llm/__init__.py`、`llm/base.py`） |
-| 可运行能力 | 能构造 OpenAI 格式的消息；能用假客户端跑通 `LLMClient` 契约；**还不能发真实请求** |
-| 测试 | 0 个（测试要等主链路成形后再补） |
-| 代码规模 | 约 360 行 |
+| 当前阶段 | **M1 地基**（接近完成） |
+| 已完成文件 | 5 个（`agentlab/__init__.py`、`types.py`、`llm/__init__.py`、`llm/base.py`、`llm/openai_compat.py`） |
+| 可运行能力 | 能用 `MockTransport` 跑通完整一轮（含并行工具调用 + 工具回填）；**真实请求还没发过** |
+| 测试 | 0 个自动化测试（手工验证脚本放 `/tmp`，不进仓库） |
+| 代码规模 | 839 行（`wc -l`：types 265 / base 179 / openai_compat 353 / 两个 `__init__` 42 / 包入口 3） |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / pytest / ruff / mypy） |
 
-一句话：**地基和接口都定好了，还差一次真的网络请求。**
+一句话：**适配器写完了，只差用真 key 打一次真实的 `POST /chat/completions`。**
 
 ---
 
@@ -30,7 +30,8 @@ MyAgent/
 │   ├── types.py            ← ✅ 数据契约（OpenAI 格式）
 │   └── llm/                ← 模型适配层
 │       ├── __init__.py     ← ✅ 导出契约
-│       └── base.py         ← ✅ 错误分类 + LLMClient 接口
+│       ├── base.py         ← ✅ 错误分类 + LLMClient 接口
+│       └── openai_compat.py← ✅ OpenAI 兼容适配器（353 行）
 ├── docs/
 │   ├── goal-and-design.md  ← 目标与实现方式
 │   ├── working-agreement.md← 协作约定（怎么写、怎么讲）
@@ -87,8 +88,8 @@ $ .venv/bin/python -c "import agentlab; print(agentlab.__file__)"
 | `TextBlock` | 一段文本 |
 | `ToolCallBlock` | 模型要求调用工具（`id` 是配对凭证；`arguments` 是 JSON **字符串**原文） |
 | `ToolResultBlock` | 工具执行结果（`is_error` 给我们自己看，OpenAI 协议无此字段） |
-| `Message` | 角色 + 内容块；提供 `system/user/assistant/tool/tool_results` 构造器与 `text/tool_calls/tool_result_blocks` 视图方法 |
-| `ToolSpec` | 给模型看的工具说明书，三字段等于 OpenAI 的 `function` 对象 |
+| `Message` | 角色 + 内容块；提供 `system/user/assistant/tool/from_tool_results` 构造器与 `text/tool_calls/tool_results` 视图方法 |
+| `ToolDefinition` | 给模型看的工具说明书，三字段等于 OpenAI 的 `function` 对象 |
 | `Usage` | token 账本：`input/output/cached_input`，支持 `+` 累加 |
 | `Completion` | 一次模型调用的完整结果 |
 
@@ -104,9 +105,10 @@ user
 - 内容块而不是纯字符串——因为一条 assistant 消息里可以同时有解释和多个工具调用
 - `frozen=True` + `tuple`——历史只追加，禁止回头改已发出的消息
 - **OpenAI 原生**——`role="tool"`、`tool_calls`、`arguments` 用 JSON 字符串，
-  都是协议原样；一条工具结果 = 一条 `role="tool"` 消息（`Message.tool_results` 返回元组）
+  都是协议原样；一条工具结果 = 一条 `role="tool"` 消息（`Message.from_tool_results` 返回元组）
 - 缓存命中——`Usage.cached_input_tokens` 单独记，因为价格差一个数量级；
   它**包含在** `input_tokens` 内，`uncached_input_tokens` 是全价部分
+- 命名——`ToolDefinition` 是**声明**（不能执行），将来 `Tool` 才是实现；两个名字成对，读代码不用猜哪个能跑
 
 ### 3.4 `agentlab/llm/base.py`（文件 2 / 约 180 行）
 
@@ -140,13 +142,115 @@ TypeError: Can't instantiate abstract class LLMClient without an implementation 
 - 用 `ABC` 不用 `Protocol`：漏实现方法在**实例化时**就报错
 - 有它之后，主循环的测试可以全用假客户端，不需要网络
 
+### 3.5 `agentlab/llm/openai_compat.py`（文件 3 / 353 行）
+
+**职责**：实现 `LLMClient`——`Message` 列表 → OpenAI HTTP 请求，响应 JSON → `Completion`。
+DeepSeek / Kimi / 通义兼容模式 / vLLM / Ollama 都能用。
+
+结构上刻意分两半：**上半是纯函数（不联网），下半只剩发请求**。因为翻译才是 bug 高发区，纯函数用普通 assert 就能测。
+
+命名约定（2026-11-19 定案，改过一次名）：
+
+- 三个纯函数叫 `encode_messages` / `encode_tools` / `decode_response`，不用 `to_openai_xxx`：源和目标在同一句话里都看得见，且将来 `anthropic_compat` 能复用同一套动词。
+- 类型叫 `ToolDefinition` 不叫 `ToolSpec`：它是给模型看的**声明**，不能执行；以后 `tools/base.py` 里能跑的才叫 `Tool`。
+- `Completion` **保持不改**：它贴着 OpenAI 协议（`/chat/completions`、`completion_tokens`），改成 `ModelResponse` 反而丢掉这层对齐。
+
+逐功能清单：
+
+| 代码单元 | 行 | 做什么 | 关键取舍 |
+|---|---|---|---|
+| `_FINISH_REASON` | 49-54 | `finish_reason` → `StopReason` 查表 | 查不到的走兜底、**不抛异常**：厂商新增取值不该让整轮失败 |
+| `encode_messages` | 62-120 | 四条角色分支编码（`Message` → JSON） | `tool` 一块一条消息；`assistant` 无内容提前拦；`arguments` 原样透传 |
+| `encode_tools` | 123-139 | `ToolDefinition` 套两层壳 | `parameters` 不解析，只透传 |
+| `_parse_usage` | 142-161 | token 账本 | 兼容 OpenAI `prompt_tokens_details.cached_tokens` 与 DeepSeek `prompt_cache_hit_tokens` |
+| `decode_response` | 164-224 | 响应 JSON → `Completion` | 逐字段校验，缺字段报 `ResponseFormatError` 而不是在下游炸 |
+| `_preview` | 227-230 | 压一行 + 截断 300 | 防止一整页 HTML 打进终端 |
+| `OpenAIClient.__init__` | 245-264 | 存 key/model/url，建或注入 http | `httpx` 自带重试必须关（`retries=0`）；`_owns_http` 记所有权 |
+| `from_env` | 266-280 | 读三个环境变量 | **不加载 `.env`**：改进程环境是 `cli.py` 的事 |
+| `complete` | 286-330 | 组装 payload → POST → 分类错误 → 解析 | `tools` 为空时**不加这个字段**；`from exc` 保留原始堆栈 |
+| `aclose` | 332-335 | 释放连接池 | 只关自己创建的，注入的不动 |
+| `_retry_after` | 338-343 | 读 `Retry-After` 头 | 只认数字秒；HTTP-date 格式读不出，返回 `None` 让重试器自己估 |
+
+几个容易踩的代码点：
+
+```python
+# 1) tool 结果：一条块一条消息，is_error 在这里被丢弃（协议没有这个字段）
+for block in msg.tool_results():
+    out.append({"role": "tool", "tool_call_id": block.tool_call_id,
+                "content": block.content})
+
+# 2) assistant：有工具无文本时 content 必须是 None，给 "" 有的服务会 400
+item = {"role": "assistant", "content": text or None}
+
+# 3) arguments 本来就是 JSON 字符串，再 dumps 一次 = 双层转义
+"arguments": call.arguments or "{}"
+
+# 4) 只有传了工具才加 tools 字段（空数组有的服务报 400）
+if tools:
+    payload["tools"] = encode_tools(tools)
+```
+
+验证（`/tmp/verify_openai_compat.py`，全程 `httpx.MockTransport`，不联网、不填 key）：
+
+```
+$ .venv/bin/python /tmp/verify_openai_compat.py
+
+=== 1. encode_messages：文本 + 两个并行工具调用 + 两条工具结果 ===（节选）
+{"role": "assistant", "content": "我先看这两个文件",
+ "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"a.py\"}"}}, {...第二个略}]}
+{"role": "tool", "tool_call_id": "call_1", "content": "print(1)"}
+{"role": "tool", "tool_call_id": "call_2", "content": "Permission denied"}
+
+=== 2. encode_tools ===
+[{"type": "function", "function": {"name": "read_file", "description": "读一个文件",
+  "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}]
+
+=== 3. decode_response：finish_reason=tool_calls + DeepSeek 缓存命中 ===
+stop_reason = tool_use
+text        = '我查一下'
+tool_calls  = [('call_x', 'read_file', '{"path":"a.py"}')]
+usage       = Usage(input_tokens=1200, output_tokens=30, cached_input_tokens=1024) | total = 1230 | 全价输入 = 176
+
+=== 4. decode_response：没见过的 finish_reason 走兜底（不抛异常） ===
+stop_reason = end_turn | usage = Usage(input_tokens=0, output_tokens=0, cached_input_tokens=0)
+
+=== 5. 真报错 A：assistant 既没文本也没工具调用 ===
+BadRequestError: assistant 消息既没有文本也没有工具调用，发出去必被拒
+
+=== 6. 真报错 B：HTTP 200 但 body 没有 choices ===
+ResponseFormatError: 响应里没有 choices：{"error": "something"}
+
+=== 7. OpenAIClient.complete()：MockTransport，记录发出去的请求 ===
+实际请求 URL : https://example.invalid/v1/chat/completions
+Authorization: Bearer sk-fake
+请求 messages: [{'role': 'user', 'content': '你好'}]
+请求带 tools : True
+--> Completion: tool_use deepseek-chat Usage(input_tokens=1200, output_tokens=30, cached_input_tokens=1024)
+aclose() 后注入的 client 仍可复用: True
+
+AuthError (status=401, retryable=False): 鉴权失败(401)：检查 AGENTLAB_API_KEY 是否正确、是否过期 | {"error":{"message":"Invalid API key"}}
+
+NetworkError: 连接 http://127.0.0.1:9 失败：All connection attempts failed
+```
+
+静态检查：`ruff check agentlab` → `All checks passed!`；`python -m mypy agentlab` → `Success: no issues found in 5 source files`。
+
+设计要点：
+
+- **编解码与传输分离**：`encode_messages` / `encode_tools` / `decode_response` 都是纯函数，不联网就能测；`complete()` 只剩"发请求 + 分类错误"。
+- **编码错误提前拦**：`assistant` 既无文本也无工具调用时直接抛 `BadRequestError`，而不是等服务端回一个看不懂的 400。
+- **`is_error` 在发请求时丢弃**：OpenAI 协议没有这个字段，它只活在我们自己的历史与 UI 里；模型看到的是错误文本。
+- **未知 `finish_reason` 兜底是"猜"**：有工具调用判 `tool_use`，否则 `end_turn`。全文件唯一不按字段原样走的地方。
+- **不重试、不打印、不流式**：`stream=False` 写死；429 只抛带 `retry_after` 的 `RateLimitError`；渲染归 `cli.py`。
+- 诚实记录两处小瑕疵：`_preview` 与 `base._short` 逻辑重复（因 `_short` 是私有）；`_retry_after` 不解析 HTTP-date 格式。
+
 ---
 
 ## 4. 尚未开始
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ⬜ 下一步 |
+| M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 代码完成，待真实请求验证 |
 | M2 | `tools/` 工具系统 + 文件工具 | ⬜ |
 | M3 | `loop.py` 主循环 | ⬜ |
 | M4 | `context.py` / `policy.py` / `session.py` / `cli.py` | ⬜ |
@@ -154,22 +258,43 @@ TypeError: Can't instantiate abstract class LLMClient without an implementation 
 
 ---
 
-## 5. 下一步：`agentlab/llm/openai_compat.py`
+## 5. 下一步：M1 收尾（一次真实请求）
 
-**只做一件事**：`openai_compat` 实现 `LLMClient`——把消息列表变成 HTTP 请求，把回来的 JSON 变成 `Completion`。
+`openai_compat.py` 的验收清单，8 项里 8 项已有真实证据，但证据全部来自 `MockTransport`——**还没打过真正的网络**：
 
-验收标准（全部满足才算完成）：
+- [x] 从环境变量读 `AGENTLAB_BASE_URL` / `AGENTLAB_API_KEY` / `AGENTLAB_MODEL`（缺 key 与填 key 两条路径都跑过，见 3.5）
+- [x] `Message` → OpenAI `messages` 数组（含 `role="tool"`、并行 `tool_calls`）
+- [x] `ToolDefinition` → `tools` 数组
+- [x] `usage` 解析出 `cached_input_tokens`（DeepSeek 写法已验证）
+- [x] `finish_reason` → `StopReason` 映射，未知值有兜底
+- [x] **非流式**
+- [x] 错误按 `base.py` 分类抛（401 → `AuthError`、连不上 → `NetworkError` 都实测过）
+- [x] 函数内部不打印任何东西
 
-- [ ] 从环境变量读 `AGENTLAB_BASE_URL` / `AGENTLAB_API_KEY` / `AGENTLAB_MODEL`
-- [ ] `Message` → OpenAI `messages` 数组的翻译（含 `role="tool"`、`tool_calls`）
-- [ ] `ToolSpec` → `tools` 数组（`{"type": "function", "function": {...}}`）
-- [ ] `usage` 解析出 `cached_input_tokens`
-- [ ] `finish_reason` → `StopReason` 映射，未知值有兜底
-- [ ] **非流式**（流式留到下一步）
-- [ ] 错误按 `base.py` 的分类抛，不吞
-- [ ] 函数内部**不打印任何东西**（渲染是 cli 的事）
+只剩一件事：**用真 key 发一轮**，确认真实服务端接受这套 payload（尤其 `arguments` 透传和 `content: null`）：
 
-预计 120-150 行。
+```bash
+cp .env.example .env        # 填入 AGENTLAB_API_KEY
+.venv/bin/python -c "
+import asyncio
+from dotenv import load_dotenv; load_dotenv()
+from agentlab.llm import OpenAIClient
+from agentlab.types import Message
+
+async def main():
+    c = OpenAIClient.from_env()
+    r = await c.complete([Message.user('用一句话说明你是谁')])
+    print(r.stop_reason, r.usage)
+    print(r.message.text())
+    await c.aclose()
+
+asyncio.run(main())
+"
+```
+
+通过之后 M1 收尾，进入 **M2 的第一个文件 `agentlab/tools/base.py`**：工具协议 + 执行结果 + 输出截断。仍然一次一个文件。
+
+> 文档冲突已消除：本文此前把 M1 标为"⬜ 下一步"，与 `openai_compat.py` 已存在的事实不符；本次一并同步。
 
 ---
 
@@ -185,6 +310,9 @@ TypeError: Can't instantiate abstract class LLMClient without an implementation 
 | 2026-11-18 | 新增 `agentlab/llm/`：`base.py` 定错误分类与 `LLMClient` 契约，`__init__.py` 导出 |
 | 2026-11-18 | 新增 `docs/working-agreement.md`：把"怎么讲新文件、怎么控复杂度"写成固定约定 |
 | 2026-11-18 | 提交 `a239380`（types + llm 契约 + 文档同步） |
+| 2026-11-19 | 新增 `agentlab/llm/openai_compat.py`（353 行）：三个翻译纯函数 + `OpenAIClient`；全程 `MockTransport` 验证，未联网 |
+| 2026-11-19 | `working-agreement.md` 第 2 节改写为"逐文件 → 逐功能 → 逐代码"；第 9 节补一条反馈信号 |
+| 2026-11-19 | 命名调整：`ToolSpec` → `ToolDefinition`；`to_openai_messages`/`to_openai_tools`/`parse_completion` → `encode_messages`/`encode_tools`/`decode_response`；`Completion` 与 `complete()` 保持不动（贴协议）。改完重跑验证，脚本/ruff/mypy 全绿 |
 
 ### 2026-11-18 的两条调整
 
@@ -210,6 +338,7 @@ TypeError: Can't instantiate abstract class LLMClient without an implementation 
 | 无自动化测试 | 重构时缺少回归保护 | M5 补；当前每个文件用手工脚本验证 |
 | Python 3.14 较新 | 个别第三方库可能没有适配 | 目前依赖均正常 |
 | 开发机文件工具异常 | DSH 的文件编辑工具无法覆盖 WSL 路径下的已有文件，只能用脚本改写 | 环境问题，与项目无关；不影响 GitHub 上传 |
+| `.venv/bin/mypy` 入口脚本损坏 | 直接执行报 `bad interpreter`（shebang 指向 `/home/afei/agentlab/.venv`） | 改用 `.venv/bin/python -m mypy`；重建 venv 时一并修 |
 
 ---
 

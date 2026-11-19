@@ -139,13 +139,16 @@ class Message:
         return cls(role="tool", content=(block,))
 
     @classmethod
-    def tool_results(cls, blocks: tuple[ToolResultBlock, ...]) -> tuple["Message", ...]:
+    def from_tool_results(cls, blocks: tuple[ToolResultBlock, ...]) -> tuple["Message", ...]:
         """一批工具结果 → 一批 tool 消息。
 
         注意返回的是**元组**，因为 OpenAI 要求一个 tool_call 对应一条
         role="tool" 消息，缺一条就 400。批量调用时用：
-            history.extend(Message.tool_results(blocks))
+            history.extend(Message.from_tool_results(blocks))
         这个函数的存在就是为了不让人"算完一个填一个"。
+
+        名字带 from_ 前缀：它是**构造器**，不要和实例方法 tool_results()
+        搞混 —— 那个是读一条消息里已有的结果。
         """
         return tuple(cls.tool(b) for b in blocks)
 
@@ -159,12 +162,14 @@ class Message:
         """这一步要执行哪些工具调用 —— 主循环靠它决定"继续还是收工"。"""
         return tuple(b for b in self.content if isinstance(b, ToolCallBlock))
 
-    def tool_result_blocks(self) -> tuple[ToolResultBlock, ...]:
+    def tool_results(self) -> tuple[ToolResultBlock, ...]:
         """读取消息里的工具结果。
 
-        名字故意长一点：类里已有 classmethod tool_results，同名的实例方法
-        会被后者覆盖（Python 类体是普通命名空间，没有重载），
-        报错会变成莫名其妙的 "'tuple' object has no attribute 'content'"。
+        三个视图与三个内容块一一对应，命名只差 Block 后缀：
+            text()          → TextBlock
+            tool_calls()    → ToolCallBlock
+            tool_results()  → ToolResultBlock
+        造消息请用类方法 Message.from_tool_results()。
         """
         return tuple(b for b in self.content if isinstance(b, ToolResultBlock))
 
@@ -175,8 +180,12 @@ class Message:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolSpec:
+class ToolDefinition:
     """给模型看的工具说明书。
+
+    叫 Definition 不叫 Spec：它是给模型看的**声明**，本身不能执行；
+    将来 tools/base.py 里可执行的工具叫 Tool。定义与实现分开命名，
+    读代码时不用猜哪个能 run。
 
     三个字段正好等于 OpenAI 的 function 对象，适配器直接包一层
     {"type": "function", "function": {...}} 就能发出去。
@@ -255,6 +264,6 @@ __all__ = [
     "TextBlock",
     "ToolCallBlock",
     "ToolResultBlock",
-    "ToolSpec",
+    "ToolDefinition",
     "Usage",
 ]
