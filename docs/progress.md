@@ -244,6 +244,83 @@ NetworkError: 连接 http://127.0.0.1:9 失败：All connection attempts failed
 - **不重试、不打印、不流式**：`stream=False` 写死；429 只抛带 `retry_after` 的 `RateLimitError`；渲染归 `cli.py`。
 - 诚实记录两处小瑕疵：`_preview` 与 `base._short` 逻辑重复（因 `_short` 是私有）；`_retry_after` 不解析 HTTP-date 格式。
 
+### 3.6 `agentlab/tools/base.py`（文件 4 / 188 行）+ `agentlab/tools/__init__.py`（21 行）
+
+**职责**：只定工具的形状——声明（`ToolDefinition` 由类属性生成）、实现（`Tool.run`）、结果（`ToolResult`）、截断（`truncate_output`）。**校验、超时、兜异常、查表都不在这里**，留给下一个文件 `registry.py`。
+
+不 import 网络、不 import 文件系统、不知道 agent 存在，因此测它只需要普通对象。
+
+逐功能清单：
+
+| 代码单元 | 行 | 做什么 | 关键取舍 |
+|---|---|---|---|
+| `ToolResult` | 38-66 | 结果三字段：`content` / `is_error` / `truncated` | 失败是**正常返回**而不是异常；`truncated` 只给我们自己看，不进协议 |
+| `ToolResult.ok` / `.fail` | 50-56 | 两种构造快捷方式 | 让 `return ToolResult.fail("文件不存在")` 一眼看出是失败分支 |
+| `ToolResult.to_block` | 58-66 | → `ToolResultBlock` | `tool_call_id` 必须来自模型给的那个 id；配错时所有结构都合法，只有模型会串味 |
+| `ToolError` | 72-80 | 能解释清楚的失败 | 与"我们的 bug"分开：前者消息原样给模型，后者进日志带 traceback |
+| `Tool` | 87-127 | 三属性 + `definition` + 抽象 `run` | `definition` 由类属性现算，声明与执行共用同一份 `parameters`，不会漂 |
+| `Tool.definition` | 101-114 | 类属性 → `ToolDefinition` | 缺 `name` / `parameters` 在这里就抛 `ValueError`（注册期发现，不是等模型点名） |
+| `Tool.run` | 116-127 | `async def run(args: Mapping) -> ToolResult` | 收 Mapping 不收 `**kwargs`：JSON 键名任意，且错误信息要能点名是哪个键 |
+| `truncate_output` | 140-180 | 超长砍中间，返回 `(文本, 是否截断)` | 头尾都留；切口**对齐行边界**（否则模型会以为结构到此为止）；`head_ratio` 按工具调比例；仍只是兜底 |
+
+验证（`/tmp/verify_tools_base.py`，纯内存）：
+
+```
+=== 1. Tool.definition：给模型看的那份声明 ===
+ToolDefinition(name='echo', description='把输入原样返回，用来验证工具协议',
+               parameters={'type': 'object', 'properties': {'text': {'type': 'string'}}, 'required': ['text']})
+
+[{"type": "function", "function": {"name": "echo", "description": "把输入原样返回，用来验证工具协议",
+  "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}]
+
+=== 2. run → ToolResult → to_block → tool 消息（is_error 在这里被协议丢掉） ===
+成功 : ToolResult(content='hi', is_error=False, truncated=False)
+失败 : ToolResult(content='参数类型不对：text 应为 string', is_error=True, truncated=False)
+{"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", ...}, {"id": "call_2", ...}]}
+{"role": "tool", "tool_call_id": "call_1", "content": "hi"}
+{"role": "tool", "tool_call_id": "call_2", "content": "参数类型不对：text 应为 string"}
+回填块里 is_error 还在（本地): [False, True]
+
+=== 3. 忘写 parameters：访问 definition 时直接炸，不进请求 ===
+ValueError: NoParamsTool 缺 name 或 parameters：parameters 至少要 {'type': 'object', 'properties': {}}
+
+=== 4. 执行不下去抛 ToolError，由调用方兜住 ===
+ToolError: 目标路径越界：../../etc/passwd（只能在工作区内操作）
+
+=== 5. truncate_output：短的不动，长的砍中间 ===
+短文本: 'print(1)' | 截断 = False
+原文长度: 55000
+截断 = True | 返回长度: 24000
+切口前最后一行: 'line 01089'
+切口后第一行  : 'line 03910'
+结尾 : ' 04996\nline 04997\nline 04998\nline 04999\n'
+
+=== 6. 自定义上限（limit=100） ===
+截断 = True | 返回长度: 108
+'line 00000\nline 00001\nline 00002\nline 00003\n… [中间省略 54913 字符] …\nline 04996\nline 04997\nline 04998\nline 04999\n'
+
+=== 7. head_ratio：traceback 场景只留头部 1/4 ===
+头段行数 = 22 | 尾段行数 = 69
+
+=== 8. 非法 head_ratio 与超长单行（没有换行可对齐） ===
+ValueError: head_ratio 必须在 (0, 1) 之间，收到 1.5
+单行 50000 字符 → 截断 = True | 返回: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' … 'AAAAAAAAAAAAAAA'
+```
+
+（第 5/6 条与改动前对比：之前切口落在 `line 0` / `04995` 这种半行上，返回长度 24021；现在首尾都是完整行，长度 24000。单行无换行时退化为硬切，见第 8 条。）
+
+静态检查：`ruff check agentlab` → `All checks passed!`（首次跑出 2 个 `UP037`：`"ToolResult"` 不该加引号，因已 `from __future__ import annotations`，已修）；`python -m mypy agentlab` → `Success: no issues found in 7 source files`。
+
+设计要点：
+
+- **声明与实现共用一份 `parameters`**：发给模型的和用来校验的是同一个对象，杜绝"文档写 A、代码查 B"。
+- **结果只收字符串**：它最终要进 prompt，模型只读文本；结构化值进 prompt 前总得序列化，那就在工具里做完，顺带逼着想清楚"这个对象打印出来模型能看懂吗"。
+- **失败是数据（4.4 的落地）**：`ToolResult(is_error=True)` 正常返回，模型读到"文件不存在"会自己换路；只有实现层面走不下去才抛 `ToolError`。
+- **截断砍中间，但不切半行**：头尾都有决定性信息（报错结论在末尾、import/定义在开头）。切口对齐行边界——半行会让模型以为结构到此为止，据此 `edit_file` 必然匹配不上。实测 55000 字符 → 24000，首行 `line 01089`、末行 `line 03910` 都完整。
+- **`head_ratio` 留出按内容调的门**：默认 0.5；`bash` 的 traceback 结论在末尾可给 0.25，`grep` 命中在前面可给 0.8。现在没人传非默认值，参数先摆好。
+- **截断只是兜底，不是解法**：真正的解法是工具自带分页（`read_file` 的 offset/limit），让长输出一开始就不整段塞进来。已列为 `registry.py` / `builtin/fs.py` 的验收项。
+- **不做的**：schema 校验、超时、重试、注册表——全在 `registry.py`；`truncate_output` 只被它调用，且它不知道自己在截什么（不按工具语义做启发式）。
+
 ---
 
 ## 4. 尚未开始
@@ -251,14 +328,25 @@ NetworkError: 连接 http://127.0.0.1:9 失败：All connection attempts failed
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 代码完成，待真实请求验证 |
-| M2 | `tools/` 工具系统 + 文件工具 | ⬜ |
+| M2 | `tools/` 工具系统 + 文件工具 | 🟡 `base.py` ✅（协议 / 结果 / 截断），待 `registry.py` |
 | M3 | `loop.py` 主循环 | ⬜ |
 | M4 | `context.py` / `policy.py` / `session.py` / `cli.py` | ⬜ |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 ---
 
-## 5. 下一步：M1 收尾（一次真实请求）
+## 5. 下一步：M2 第二个文件 `agentlab/tools/registry.py`
+
+M1 的真实请求暂缓（需要真 key，不阻塞后续开发）；`tools/base.py` 已完成，见 3.6。
+
+`registry.py` 要做五道守门：**查表**（模型点名的工具不存在）→ **JSON Schema 校验**（4.5）→ **超时** → **兜异常**（`ToolError` 原样给模型，其他异常加前缀进日志）→ **截断回填**（`truncate_output` + `ToolResult.to_block`）。之后是 `tools/builtin/fs.py`。
+
+截断讨论留下的两条验收项，别忘：
+
+- **截断后要给出可执行的下一步**：回填文本附"共 N 字符，可用 `read_file` 的 offset 继续"，全文落临时文件、路径交给模型。只说"被截断了"等于让模型束手无策。
+- **让截断尽量不发生**：`read_file` 自带 `offset` / `limit`，`grep` 自带命中上限。目标是日常使用中 `truncate_output` 几乎不触发，它只做最后一道闸。
+
+### M1 欠账（有真 key 时补）
 
 `openai_compat.py` 的验收清单，8 项里 8 项已有真实证据，但证据全部来自 `MockTransport`——**还没打过真正的网络**：
 
@@ -292,7 +380,7 @@ asyncio.run(main())
 "
 ```
 
-通过之后 M1 收尾，进入 **M2 的第一个文件 `agentlab/tools/base.py`**：工具协议 + 执行结果 + 输出截断。仍然一次一个文件。
+通过之后 M1 收尾。M2 已开工：`tools/base.py` ✅（3.6），下一个是 `registry.py`。仍然一次一个文件。
 
 > 文档冲突已消除：本文此前把 M1 标为"⬜ 下一步"，与 `openai_compat.py` 已存在的事实不符；本次一并同步。
 
@@ -313,6 +401,8 @@ asyncio.run(main())
 | 2026-11-19 | 新增 `agentlab/llm/openai_compat.py`（353 行）：三个翻译纯函数 + `OpenAIClient`；全程 `MockTransport` 验证，未联网 |
 | 2026-11-19 | `working-agreement.md` 第 2 节改写为"逐文件 → 逐功能 → 逐代码"；第 9 节补一条反馈信号 |
 | 2026-11-19 | 命名调整：`ToolSpec` → `ToolDefinition`；`to_openai_messages`/`to_openai_tools`/`parse_completion` → `encode_messages`/`encode_tools`/`decode_response`；`Completion` 与 `complete()` 保持不动（贴协议）。改完重跑验证，脚本/ruff/mypy 全绿 |
+| 2026-11-19 | 新增 `agentlab/tools/base.py`（166 行）与 `agentlab/tools/__init__.py`（21 行）：`Tool` 协议、`ToolResult`、`ToolError`、`truncate_output`。验证脚本、ruff（修掉 2 处 UP037）、mypy 全绿 |
+| 2026-11-19 | `truncate_output` 由"按字符硬切"改为"切口对齐行边界 + `head_ratio` 可调"（188 行）：半行会让模型误判结构、`edit_file` 匹配失败。重新验证 8 项、ruff、mypy 全绿；截断的分页解法列为后续验收项 |
 
 ### 2026-11-18 的两条调整
 
