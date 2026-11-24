@@ -8,6 +8,10 @@ dependencies = [
     "rich>=13.7",
     "python-dotenv>=1.0",
     "jsonschema>=4.21",
+    # HTTP 服务：main.py 里装配。选 fastapi 是为了 pydantic 校验 + /docs 交互页，
+    # 后者在调试阶段比记 curl 参数省事得多。
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -16,6 +20,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "mypy>=1.10",
+    # jsonschema 本体不带 py.typed，配 mypy strict 必须有这份存根，
+    # 否则 registry.py 会报 import-untyped（不能为它关严格模式）。
+    "types-jsonschema>=4.21",
 ]
 
 [project.scripts]
@@ -28,13 +35,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["agentlab"]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
 [tool.ruff]
 line-length = 100
-src = [".", "tests"]
+src = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -42,4 +45,4 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["agentlab"]
+files = ["agentlab", "main.py"]

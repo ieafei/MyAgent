@@ -1,0 +1,10 @@
+{
+  "python.terminal.activateEnvironment": false,
+  "python-envs.terminal.autoActivationType": "off",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "**/.pytest_cache": true
+  }
+}
