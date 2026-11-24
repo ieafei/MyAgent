@@ -2,7 +2,7 @@
 
 > 不用任何 agent 框架，从空目录开始、逐文件手写的生产级 agent。
 
-**状态：早期开发中（M1 地基），当前还不能用。**
+**状态：早期开发中（M1 已收尾，M2 进行中）。现在可以起一个 HTTP 服务，用 `/chat` 做单轮对话；多轮与工具执行还没接上。**
 
 ---
 
@@ -49,13 +49,14 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M1 | 数据契约、模型客户端 | 🚧 进行中 |
-| M2 | 工具系统 + 文件工具 | ⬜ |
+| M1 | 数据契约、模型客户端 | ✅ 真实请求验证通过 |
+| M2 | 工具系统 + 文件工具 | 🚧 `tools/base.py` ✅，待注册表 |
 | M3 | 主循环 | ⬜ |
 | M4 | 上下文压缩、权限、持久化、CLI | ⬜ |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
-已完成：`agentlab/types.py`（数据契约，OpenAI 格式）、`agentlab/llm/base.py`（错误分类 + 客户端契约）。
+已完成：`types.py`（数据契约，OpenAI 格式）、`llm/`（错误分类 + OpenAI 兼容适配器）、
+`tools/base.py`（工具协议与结果截断）、`main.py`（HTTP 服务入口）。
 详见 [docs/progress.md](docs/progress.md)。
 
 ## 快速开始
@@ -70,7 +71,17 @@ pip install -e ".[dev]"
 
 cp .env.example .env      # 填入 AGENTLAB_API_KEY
 
-python -c "import agentlab; print(agentlab.__version__)"
+python main.py            # 起服务，默认 127.0.0.1:8000
+```
+
+然后浏览器打开 <http://127.0.0.1:8000/> —— 网页版对话测试台，发消息即可看到回复、
+token 用量、延迟与错误码；<http://127.0.0.1:8000/docs> 是自动生成的接口文档。
+
+命令行验证也行：
+
+```bash
+curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
+     -d '{"text":"用一句话说明你是谁"}'
 ```
 
 ## 文档
@@ -81,7 +92,7 @@ python -c "import agentlab; print(agentlab.__version__)"
 
 ## 技术栈
 
-Python 3.11+ · httpx · jsonschema · rich · pytest · uv
+Python 3.11+ · httpx · jsonschema · rich · FastAPI · uvicorn · uv
 
 ## License
 
