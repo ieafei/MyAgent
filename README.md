@@ -52,12 +52,12 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 | M1 | 数据契约、模型客户端 | ✅ 真实请求验证通过 |
 | M2 | 工具系统 + 文件工具 | ✅ 5 个文件工具，注册表已接进服务 |
 | M3 | 主循环 | ✅ `loop.py`，`/chat` 已闭环（多步工具调用） |
-| M4 | 会话、流式、上下文压缩、权限、CLI | 🚧 `session.py` ✅，还剩流式与压缩 |
+| M4 | 会话、流式、上下文压缩、权限、CLI | 🚧 `session.py` ✅、`context.py` ✅，还剩流式、权限、CLI |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 已完成：`types.py`（数据契约，OpenAI 格式）、`llm/`（错误分类 + OpenAI 兼容适配器）、
 `tools/`（工具协议、注册表、5 个文件工具）、`loop.py`（agent 主循环）、
-`session.py`（会话存储）、`main.py`（HTTP 服务入口）。
+`session.py`（会话存储）、`context.py`（上下文预算）、`main.py`（HTTP 服务入口）。
 详见 [docs/progress.md](docs/progress.md)。
 
 ## 快速开始

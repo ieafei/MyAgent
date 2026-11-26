@@ -21,6 +21,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .context import DEFAULT_BUDGET_TOKENS, fit
 from .llm.base import LLMClient
 from .tools.registry import ToolRegistry
 from .types import Message, StopReason, Usage
@@ -79,6 +80,7 @@ class Agent:
     registry: ToolRegistry
     system_prompt: str | None = None
     max_steps: int = 10
+    max_context_tokens: int = DEFAULT_BUDGET_TOKENS
 
     async def run(
         self,
@@ -86,7 +88,18 @@ class Agent:
         history: Sequence[Message] = (),
     ) -> AgentResult:
         """跑一次任务。`history` 是之前几轮的消息，`None`/空表示从零开始。"""
-        messages = self._start(user_input, history)
+        # 发给模型前先按预算压一遍：历史来自 session，可能已经很长，
+        # 而一次任务内部还会继续长（每轮的工具结果都追加），不在入口压就会打爆窗口。
+        fitted = fit(history, max_tokens=self.max_context_tokens)
+        if fitted.changed:
+            log.info(
+                "[ctx] %d→%d tokens（压缩 %d 条工具结果，丢弃 %d 条消息）",
+                fitted.before_tokens,
+                fitted.after_tokens,
+                fitted.squeezed,
+                fitted.dropped,
+            )
+        messages = self._start(user_input, fitted.messages)
         # 工具清单在整个任务期间不变，循环外取一次即可；
         # 每轮都调 definitions() 会白白重建一遍 Schema。
         tools = self.registry.definitions()
