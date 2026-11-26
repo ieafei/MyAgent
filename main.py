@@ -40,17 +40,27 @@ from agentlab.llm import (
     OpenAIClient,
     RateLimitError,
 )
-from agentlab.loop import Agent, StepLimitError
+from agentlab.loop import Agent, AgentResult, StepLimitError
+from agentlab.session import SessionStore
 from agentlab.tools.builtin.fs import make_file_tools
 from agentlab.tools.registry import ToolRegistry
-from agentlab.types import ToolCallBlock, ToolDefinition, Usage
+from agentlab.types import Message, ToolCallBlock, ToolDefinition, Usage
 
 # -- 请求 / 响应模型：这就是给人看的接口文档，写清类型，/docs 自动生成 ---------
 
 
 class ChatRequest(BaseModel):
     text: str = Field(min_length=1, max_length=32_000, description="用户这句话")
-    system: str | None = Field(default=None, description="可选 system prompt，仅本次请求有效")
+    system: str | None = Field(
+        default=None,
+        description="可选 system prompt；会话里只在第一轮生效，续聊沿用历史里的那条",
+    )
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="会话 id。传同一个 id 会接着上次的历史；不传则每次都是全新任务",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -76,6 +86,14 @@ class ChatResponse(BaseModel):
     steps: int = Field(
         default=1,
         description="本次任务一共调了几轮模型；1 表示一问一答没用到工具",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="本次请求用的会话 id；为 null 表示是一次性任务，没有历史",
+    )
+    history_messages: int = Field(
+        default=0,
+        description="本次请求开头带进来的历史消息条数；用来确认会话真的接上了",
     )
 
 
@@ -153,6 +171,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         print(f"[启动失败] {exc}")
         raise
     app.state.registry = registry
+    # 会话也是进程级状态，跟 client / registry 一起建；重启即清空，这版不落盘。
+    app.state.sessions = SessionStore()
     log.info(
         "[启动] 工作区=%s 工具=%d 个：%s",
         workspace,
@@ -177,6 +197,11 @@ def _registry(request: Request) -> ToolRegistry:
     """注册表挂在 app.state 上而不是模块全局：同一个进程测试时可以起多份互不干扰。"""
     registry: ToolRegistry = request.app.state.registry
     return registry
+
+
+def _sessions(request: Request) -> SessionStore:
+    sessions: SessionStore = request.app.state.sessions
+    return sessions
 
 
 def _status_for(exc: LLMError) -> int:
@@ -260,15 +285,17 @@ def _log_chat(
     usage: Usage,
     latency_ms: int,
     steps: int,
+    history_messages: int,
 ) -> None:
     """一次 agent 任务压成一行。中途每轮由 loop 自己打 [loop] / [think]，这里只留摘要。"""
     log.info(
-        "[chat] sys=%s q=%r → %r | stop=%s steps=%d in=%d out=%d cached=%d %dms",
+        "[chat] sys=%s user=%r → %r | stop=%s steps=%d hist=%d in=%d out=%d cached=%d %dms",
         f"{len(req.system)}字" if req.system else "无",
         _brief(req.text),
         _brief(answer),
         stop_reason,
         steps,
+        history_messages,
         usage.input_tokens,
         usage.output_tokens,
         usage.cached_input_tokens,
@@ -276,16 +303,39 @@ def _log_chat(
     )
 
 
-@app.post("/chat", response_model=ChatResponse, summary="一次 agent 任务（内部多轮）")
-async def chat(req: ChatRequest, request: Request) -> ChatResponse:
-    """对外仍是一问一答，内部是完整循环：模型要工具就执行并回填，直到它收工。"""
+async def _run_agent(
+    req: ChatRequest,
+    request: Request,
+    history: tuple[Message, ...],
+) -> AgentResult:
+    """一次任务的装配 + 执行。续聊时不再传 system：它已经在 history 里。"""
     agent = Agent(
         client=_client(request),
         registry=_registry(request),
-        system_prompt=req.system,
+        system_prompt=None if history else req.system,
     )
+    return await agent.run(req.text, history)
+
+
+@app.post("/chat", response_model=ChatResponse, summary="一次 agent 任务（内部多轮）")
+async def chat(req: ChatRequest, request: Request) -> ChatResponse:
+    """对外仍是一问一答，内部是完整循环；带 session_id 就接着上次的历史。"""
     started = time.perf_counter()
-    result = await agent.run(req.text)
+    store = _sessions(request)
+    session = await store.get_session(req.session_id) if req.session_id else None
+
+    if session is None:
+        result = await _run_agent(req, request, ())
+        history_messages = 0
+    else:
+        # 锁要罩住"读历史 → 跑任务 → 写回"整段：两个并发请求各读一份历史再各写回，
+        # 后写的会覆盖先写的。只锁同一会话，不同会话照常并行。
+        async with session.lock:
+            history = tuple(session.messages)
+            result = await _run_agent(req, request, history)
+            history_messages = len(history)
+            store.save_session(session, result.messages)
+
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     # 轨迹最后一条是模型的收尾回答；正常收工时它没有工具调用。
@@ -297,6 +347,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
         result.usage,
         latency_ms,
         result.steps,
+        history_messages,
     )
     return ChatResponse(
         text=result.last_llm_text,
@@ -307,6 +358,8 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
         model=result.model or _client(request).model,
         latency_ms=latency_ms,
         steps=result.steps,
+        session_id=req.session_id,
+        history_messages=history_messages,
     )
 
 

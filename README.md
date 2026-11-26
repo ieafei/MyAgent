@@ -2,7 +2,7 @@
 
 > 不用任何 agent 框架，从空目录开始、逐文件手写的生产级 agent。
 
-**状态：早期开发中（M3 已收尾）。现在可以起一个 HTTP 服务，`/chat` 是一次真正的 agent 任务：模型要工具就执行、结果回填、再问一轮，直到它给出最终回答。还没有跨请求的会话。**
+**状态：早期开发中（M4 进行中）。现在可以起一个 HTTP 服务，`/chat` 是一次真正的 agent 任务：模型要工具就执行、结果回填、再问一轮，直到它给出最终回答；带同一个 `session_id` 还能接着上次的历史聊。会话在内存里，重启即丢。**
 
 ---
 
@@ -52,11 +52,12 @@ $ agentlab "把 agentlab/ 里所有 print 换成 logging，然后跑测试"
 | M1 | 数据契约、模型客户端 | ✅ 真实请求验证通过 |
 | M2 | 工具系统 + 文件工具 | ✅ 5 个文件工具，注册表已接进服务 |
 | M3 | 主循环 | ✅ `loop.py`，`/chat` 已闭环（多步工具调用） |
-| M4 | 上下文压缩、权限、持久化、CLI | ⬜ 下一步 |
+| M4 | 会话、流式、上下文压缩、权限、CLI | 🚧 `session.py` ✅，还剩流式与压缩 |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 已完成：`types.py`（数据契约，OpenAI 格式）、`llm/`（错误分类 + OpenAI 兼容适配器）、
-`tools/`（工具协议、注册表、5 个文件工具）、`loop.py`（agent 主循环）、`main.py`（HTTP 服务入口）。
+`tools/`（工具协议、注册表、5 个文件工具）、`loop.py`（agent 主循环）、
+`session.py`（会话存储）、`main.py`（HTTP 服务入口）。
 详见 [docs/progress.md](docs/progress.md)。
 
 ## 快速开始
@@ -86,6 +87,12 @@ curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
 # 让它用工具：它会自己读文件，再把内容总结给你
 curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
      -d '{"text":"读一下 README.md 的前 5 行，用一句话概括"}'
+
+# 会话：同一个 session_id 的第二次请求会接着上文（响应里的 history_messages 会 > 0）
+curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
+     -d '{"text":"我叫阿飞，请记住。","session_id":"demo"}'
+curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
+     -d '{"text":"我叫什么？","session_id":"demo"}'
 ```
 
 ## 文档

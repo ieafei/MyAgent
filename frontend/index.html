@@ -278,6 +278,9 @@ const input = $("input");
 const sendBtn = $("send");
 const sysEl = $("sys");
 
+// 会话 id 在页面加载时生成：刷新页面 = 开新会话，页面内连续提问 = 同一会话
+const sessionId = crypto.randomUUID();
+
 let busy = false;
 let totals = { in: 0, out: 0 };
 
@@ -350,6 +353,9 @@ function addMeta(msg, d, clientRtt) {
   if (d.usage.cached_input_tokens > 0) {
     items.push(["cached", d.usage.cached_input_tokens]);
   }
+  if (d.history_messages > 0) {
+    items.push(["hist", d.history_messages]);
+  }
   for (const [k, v] of items) {
     const s = document.createElement("span");
     s.textContent = `${k} ${v}`;
@@ -376,14 +382,6 @@ function addTools(msg, calls) {
     box.appendChild(pre);
   }
   msg.appendChild(box);
-}
-
-function addNote(text) {
-  const note = document.createElement("div");
-  note.className = "note";
-  note.textContent = "⚠ " + text;
-  list.appendChild(note);
-  scrollDown();
 }
 
 function addError(status, payload, clientRtt) {
@@ -419,7 +417,7 @@ async function send() {
   addUser(text);
   const typing = addTyping();
 
-  const body = { text };
+  const body = { text, session_id: sessionId };
   const sys = sysEl.value.trim();
   if (sys) body.system = sys;
 
@@ -442,7 +440,6 @@ async function send() {
     b.textContent = data.text || "(空回复)";
     addMeta(msg, data, rtt);
     if (data.tool_calls?.length) addTools(msg, data.tool_calls);
-    if (data.note) addNote(data.note);
     scrollDown();
   } catch (e) {
     typing.remove();

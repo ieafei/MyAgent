@@ -1,6 +1,6 @@
 # MyAgent · 当前进展
 
-> 最后更新：2026-11-23
+> 最后更新：2026-11-26
 > 文档目的：记录"现在到哪一步了"，方便随时中断、随时接上。
 
 ---
@@ -9,15 +9,15 @@
 
 | 项 | 值 |
 |---|---|
-| 当前阶段 | **M3 完成**：工具协议 ✅ → 注册表 ✅ → 内置文件工具 ✅ → 接进服务 ✅ → `loop.py` 主循环 ✅；`/chat` 已是完整 agent 任务，下一步做会话与流式（M4） |
-| 已完成文件 | `agentlab/` 下 11 个（`__init__`、`types`、`loop`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（服务入口）+ `frontend/index.html`（对话测试页） |
-| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置与工具数，`/tools` 列出 5 个已注册文件工具（与发给模型的是同一份 Schema）。**`/chat` 已是完整 agent 任务**：模型要工具就并行执行、结果回填、再问一轮，直到它给出最终回答；实测"读 README 并概括"自动跑 2 轮（`steps=2`），读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽返回 500 `StepLimitError`。模型 `deepseek-flash` 的思考逐轮写进 `[think]` 日志行与响应 `reasoning` 字段（是否返回由服务端决定，工具轮次时有时无）。`/docs` 点按钮可用，**`/` 打开网页版对话测试台** |
+| 当前阶段 | **M4 进行中**：M3 主循环 ✅；M4 第一件 `session.py` ✅——`/chat` 带同一个 `session_id` 能接着上次的历史聊，下一步做 `/chat/stream` 与 `context.py` |
+| 已完成文件 | `agentlab/` 下 12 个（`__init__`、`types`、`loop`、`session`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（服务入口）+ `frontend/index.html`（对话测试页） |
+| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置与工具数，`/tools` 列出 5 个已注册文件工具（与发给模型的是同一份 Schema）。**`/chat` 已是完整 agent 任务**：模型要工具就并行执行、结果回填、再问一轮，直到它给出最终回答；实测"读 README 并概括"自动跑 2 轮（`steps=2`），读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽返回 500 `StepLimitError`。**带 `session_id` 时可跨请求续聊**：同 id 第二句能接上第一句（实测 `hist=2`、答出上一轮给的名字），不同 id / 不传 id 各自从零开始；同会话并发请求被 `asyncio.Lock` 串行化。模型 `deepseek-flash` 的思考逐轮写进 `[think]` 日志行与响应 `reasoning` 字段（是否返回由服务端决定，工具轮次时有时无）。`/docs` 点按钮可用，**`/` 打开网页版对话测试台** |
 | 测试 | 无 pytest 用例（4 个集成测试已按决定删除）；验证方式改为"重启服务 + 网页/curl"，纯逻辑文件用 `/tmp` 脚本跑真实输出 |
-| 代码规模 | 源码约 2030 行（types 278 / llm 585 / tools 435 / builtin 518 / loop 143 / 包入口 7）+ `main.py` 325 行 + `frontend/index.html` 13.7 KB |
+| 代码规模 | 源码约 2103 行（types 278 / llm 585 / tools 435 / builtin 518 / loop 155 / session 125 / 包入口 7）+ `main.py` 378 行 + `frontend/index.html` 约 14 KB |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / fastapi / uvicorn / ruff / mypy / types-jsonschema；`pytest` 仍在 dev extras 里，仓库暂无测试文件） |
 
-一句话：**`/chat` 已经是能自己调工具的 agent——模型说"读这个文件"，它就真读、真把内容拿回来再回答；下一步把每次请求变成可持续的会话。**
+一句话：**`/chat` 已经是能自己调工具、还能记住上下文聊下去的 agent——同一个 `session_id` 的第二句能接上第一句；下一步让它边跑边说（SSE）并管住上下文长度。**
 
 ---
 
@@ -25,13 +25,14 @@
 
 ```
 MyAgent/
-├── main.py              ← ✅ 服务主入口（325 行）：/ + /health + /tools + /chat
+├── main.py              ← ✅ 服务主入口（378 行）：/ + /health + /tools + /chat
 ├── frontend/
-│   └── index.html          ← ✅ 对话测试台（13.2 KB，单文件、零构建、无 CDN）
+│   └── index.html          ← ✅ 对话测试台（约 14 KB，单文件、零构建、无 CDN）
 ├── agentlab/               ← Python 包
 │   ├── __init__.py         ← ✅ 版本号 + 导出 Agent / AgentResult / StepLimitError
 │   ├── types.py            ← ✅ 数据契约（OpenAI 格式）
-│   ├── loop.py             ← ✅ agent 主循环：调模型 → 执行工具 → 回填 → 再调（143 行）
+│   ├── loop.py             ← ✅ agent 主循环：调模型 → 执行工具 → 回填 → 再调（155 行）
+│   ├── session.py          ← ✅ 会话存储：按 id 存历史 + 成对裁剪 + 每会话一把锁（125 行）
 │   ├── llm/                ← 模型适配层
 │   │   ├── __init__.py     ← ✅ 导出契约
 │   │   ├── base.py         ← ✅ 错误分类 + LLMClient 接口
@@ -333,7 +334,7 @@ ValueError: head_ratio 必须在 (0, 1) 之间，收到 1.5
 
 ---
 
-### 3.7 `main.py`（服务主入口，317 行）
+### 3.7 `main.py`（服务主入口，378 行）
 
 一句话职责：**把库装配成一个一直开着的服务**，让"新增一个能力 → 重启 → 发一条请求"成为验证方式。断言只能证明"没坏"，服务才能证明"能用"：模型怎么答、花了多少 token、工具有没有真被调用，全都看得见。
 
@@ -343,7 +344,7 @@ ValueError: head_ratio 必须在 (0, 1) 之间，收到 1.5
 |---|---|
 | `GET /health` | 活着吗？`version` / `model` / `tools` / `uptime_s` |
 | `GET /tools` | 已注册工具清单：`registry.definitions()` 原样返回 |
-| `POST /chat` | 一次 agent 任务（内部多轮），返回 `text` / `reasoning` / `tool_calls` / `stop_reason` / `usage` / `steps` / `latency_ms` |
+| `POST /chat` | 一次 agent 任务（内部多轮），返回 `text` / `reasoning` / `tool_calls` / `stop_reason` / `usage` / `steps` / `latency_ms` / `session_id` / `history_messages`；请求带 `session_id` 则接着该会话的历史 |
 | `GET /` | 网页版对话测试台（`include_in_schema=False`，不进 `/docs`） |
 
 真实输出（`python main.py --port 8011` 之后）：
@@ -379,9 +380,9 @@ $ curl -s -X POST 127.0.0.1:8011/chat -H 'content-type: application/json' \
 
 一个任务在日志里的形状（每轮一行 [loop]，收尾一行 [chat]）：
 INFO:     [think] step=2 Read the first 10 lines. Now summarize in one sentence…
-INFO:     [loop] step=1 stop=tool_use calls=1 in=1021 out=55 cached=768 882ms
-INFO:     [loop] step=2 stop=end_turn calls=0 in=1186 out=85 cached=1024 990ms
-INFO:     [chat] sys=无 q='读一下 README.md 的前 5 行，用一句话概括' → 'README.md 前 5 行说明：…' | stop=end_turn steps=2 in=2207 out=140 cached=1792 1876ms
+INFO:     [loop] step=1 stop=tool_use tools=read_file in=1021 out=55 cached=768 882ms
+INFO:     [loop] step=2 stop=end_turn tools=- in=1186 out=85 cached=1024 990ms
+INFO:     [chat] sys=无 user='读一下 README.md 的前 5 行，用一句话概括' → 'README.md 前 5 行说明：…' | stop=end_turn steps=2 in=2207 out=140 cached=1792 1876ms
 
 `deepseek-flash` 默认带思考（`reasoning_effort=high`），但服务端**不保证每轮都给**：
 实测同一工具任务连发 3 次，只有 1 次的第二轮带 `reasoning_content`。日志里有就记，没有就跳过。
@@ -412,7 +413,7 @@ $ curl -s 127.0.0.1:8011/openapi.json | ... → 路径: ['/health', '/tools', '/
 - **`--reload` 需要 `watchfiles`**：当前只装了纯 `uvicorn`，要用它得先 `uv pip install watchfiles`；否则手动 Ctrl-C 重启。
 - **`_setup_logging()` 幂等**：`--reload` 时子进程只 import 模块、不走 `main()`，所以 `lifespan` 里也调一次。不判空就会挂两个 handler、每行日志吐两遍。
 
-### 3.8 `agentlab/loop.py`（文件 7 / 143 行）：agent 主循环
+### 3.8 `agentlab/loop.py`（文件 7 / 155 行）：agent 主循环
 
 一句话职责：**把"模型说要调工具"变成"工具真的被调用、结果真的回到模型"**。前面所有文件都在为这 40 行循环做准备。
 
@@ -451,7 +452,51 @@ messages.extend(Message.from_tool_results(tool_results))
 
 logger 命名已统一到**模块导入路径**：`agentlab.main`（入口）、`agentlab.loop`、`agentlab.tools`。此前 `main.py` 用 `myagent`、`registry.py` 用 `myagent.tools`——项目早期叫 MyAgent 的遗留，`myagent.tools` 不在 `agentlab` 层级下，一旦往里加日志就会绕过 handler 静默丢失。
 
-### 3.9 `frontend/index.html`（对话测试台，13.2 KB）
+### 3.9 `agentlab/session.py`（文件 8 / 125 行）：会话
+
+一句话：**让同一个 `session_id` 的第二句能接上第一句。**
+
+一个会话就是"一串消息 + 一把锁"：
+
+| 部分 | 职责 |
+|---|---|
+| `Session` | `id` + `messages` + 时间戳 + `asyncio.Lock`，只有 `trim()` 一个方法 |
+| `Session.trim()` | 裁到上限内：`system` 永不丢；丢 `assistant(tool_calls)` 时，把它后面连续的 `tool` 消息**一起**丢 |
+| `SessionStore.get_session()` | 查表/建表（get-or-create），全局锁只保护这一小段，不占着跑任务 |
+| `SessionStore.save_session()` | 用 `AgentResult.messages` **整体替换**（不是追加）再裁剪 |
+
+三个关键决定：
+
+- **成对裁剪**：只删 `assistant(tool_calls)` 不留 `tool`，下一次请求直接 400。这是本文件唯一的正确性红线。
+- **每会话一把锁**：锁罩住"读历史 → 跑任务 → 写回"整段。两个并发请求各读一份、各写回，后写的会覆盖先写的。
+- **`system` 只在第一轮生效**：`main.py` 续聊时传 `system_prompt=None`，历史里那条继续用；实测第二轮传"你是小蓝"仍答"你是小红"。
+
+`Agent.run()` 相应加了 `history` 参数，`_start()` 里 `list(history)` 先拷一份，避免改到 session 的 list。
+
+实测（`/tmp/verify_session.py` + `/tmp/verify_session2.py`）：
+
+```
+1 新会话 demo1  : hist=0 steps=1 text='记住了'
+2 同会话 demo1  : hist=2 steps=1 text='阿飞'
+3 另一会话 demo2: hist=0 steps=3 text='我不知道你的名字。'
+
+[裁剪] 原 37 条 → 10 条，丢 27 条；首条=system；孤立 tool 消息数=0
+[裁剪] 角色序列=['system','user','assistant','tool','user','assistant','tool',…]
+[system] 第二轮（传小蓝）text='小红' hist=3
+```
+
+并发（同一 id 两个请求同时发）：
+
+```
+hist=7 text='好'
+hist=0 text='阿飞'
+```
+
+`hist` 是 0 与 7 而不是两个 0，说明第二个请求等到第一个写完才读历史。**注意**："hist=0 却答出阿飞"不是会话串了——模型自己 `grep` 了 `log/` 目录，从历史日志里读到的（见第 7 节已知问题）。
+
+故意没做：**不落盘**（重启即丢）、**条数上限不是 token 上限**（精确预算留给 `context.py`）、**无鉴权**（猜到 id 就能接上）。淘汰会话时只淘汰空闲的，全在跑就宁可暂时超限。
+
+### 3.10 `frontend/index.html`（对话测试台，约 14 KB）
 
 一句话职责：**让人用鼠标就能把 `/chat` 的每条返回都看全**，不用背 curl 参数。
 
@@ -473,7 +518,7 @@ logger 命名已统一到**模块导入路径**：`agentlab.main`（入口）、
 
 验证：`curl -s -o /dev/null -w '%{http_code}' localhost:8000/` → `200`；`node --check` 检查内联 JS 无语法错误；`/docs` 不受影响（307→`/docs`，仍 200）。
 
-### 3.10 `agentlab/tools/registry.py`（文件 5 / 226 行）
+### 3.11 `agentlab/tools/registry.py`（文件 5 / 226 行）
 
 一句话职责：**把"模型说了一句 tool_call"变成"一条可以回填给模型的 tool 结果"**，中间六道守门（下表把"兜异常"拆成两行说）：
 
@@ -541,7 +586,7 @@ RuntimeError: 数据库连接串拼错了          ← traceback 只进日志
 - **`max_chars` 管整块文本**：截断前先让出 300 字符给提示语和截断标记，否则"截到 24000"实际回填 24300。行对齐本身还有几十字符误差，见 `truncate_output`。
 - **诚实记录**：`execute_all` 目前是 `gather` 全并发，没有并发上限——一轮里几十个调用时会同时开几十个协程，等 `fs.py` 落地后按需加信号量。
 
-### 3.11 `agentlab/tools/builtin/fs.py`（文件 6 / 509 行）
+### 3.12 `agentlab/tools/builtin/fs.py`（文件 6 / 509 行）
 
 一句话：**五个能真碰磁盘的工具，共用一份工作区检查。**
 
@@ -607,23 +652,23 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 | M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 真实请求已验证（经 `/chat` 实测） |
 | M2 | `tools/` 工具系统 + 文件工具 | ✅ 完成：`base.py` / `registry.py` / `builtin/fs.py`，已接进 `main.py`（`/tools` 可查） |
 | M3 | `loop.py` 主循环 | ✅ 完成：`Agent.run()` 调模型 → 执行工具 → 回填 → 再调，`/chat` 已接（返回 `steps`） |
-| M4 | `context.py` / `policy.py` / `session.py` / `cli.py` | ⬜ |
+| M4 | 会话 / 流式 / 上下文 / 权限 / CLI | 🚧 `session.py` ✅；剩 `context.py`、`/chat/stream`、`policy.py`、`cli.py` |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 ---
 
-## 5. 下一步：会话与流式（M4）
+## 5. 下一步：流式与上下文（M4 剩余）
 
-M3 已完成：`/chat` 内部就是 agent 循环，`steps` 告诉你在轨迹里跑了几轮。还没做的是**跨请求的会话**——现在每次 `/chat` 都是一次性任务，第二句"继续改一下"没有上下文。下一步：
+已完成：M3 的 `Agent.run()` 主循环，以及 M4 第一件 `session.py`——`/chat` 带 `session_id` 就能续聊，历史按会话存、成对裁剪、每会话一把锁（见 3.9）。剩下：
 
-1. `session.py`：按 `session_id` 存 messages，请求带着 id 续上历史。注意 `assistant(tool_calls)` 与 `tool` 结果必须成对出现，截断历史时不能只删一半（OpenAI 会 400）。
-2. `/chat/stream`：SSE 把每轮 `[loop]`、工具调用、最终回答推给前端；现在同步接口在长任务上会长时间没有响应。
-3. `context.py`：输入 token 超预算时压缩早期工具结果（`ToolResultBlock.content` 最容易爆），而不是粗暴截断消息。
+1. `/chat/stream`：SSE 把每轮的 `[loop]`、工具调用、最终回答推给前端；现在同步接口在长任务上会长时间没有响应。
+2. `context.py`：输入 token 超预算时压缩早期工具结果（`ToolResultBlock.content` 最容易爆），而不是粗暴截断消息。`session.py` 的 60 条上限只是粗粒度闸门，不是 token 预算。
+3. `policy.py`：工具级权限（工作区白名单、写入确认、"哪些目录不许读"）。这一条已经有现实理由——实测模型为了回答"我叫什么"会去 `grep log/`，从历史日志里翻出别人的对话（见第 7 节）。
 
 工具侧遗留口子（现在已经真会执行，风险从"潜在"变"现实"）：
 
-- `execute_all` 是 `gather` 全并发、无上限（3.10 已记录）。单轮工具数量大时加信号量。
-- `write_file` 非原子写（3.11 已记录）。默认工作区是 `Path.cwd()`，先只在可信目录跑。
+- `execute_all` 是 `gather` 全并发、无上限（3.11 已记录）。单轮工具数量大时加信号量。
+- `write_file` 非原子写（3.12 已记录）。默认工作区是 `Path.cwd()`，先只在可信目录跑。
 
 ### M1 验收清单（8 项全部有真实证据）
 
@@ -640,7 +685,7 @@ M3 已完成：`/chat` 内部就是 agent 循环，`steps` 告诉你在轨迹里
 
 **2026-11-20 已收尾**：先由 4 个集成用例打真网络验证（已按决定删除），再由 `main.py` 的 `/chat` 端点复验——`stop_reason=end_turn`、`usage` 齐备、`latency_ms=1215`（见 3.7）。`arguments` 透传与 `role="tool"` 回填两条，等 `registry.py` 接上后在服务里再走一遍。
 
-M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.10）→ `builtin/fs.py` ✅（3.11），下一个是改 `main.py` 把工具接进服务。仍然一次一个文件。
+M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `builtin/fs.py` ✅（3.12），下一个是改 `main.py` 把工具接进服务。仍然一次一个文件。
 
 > 文档同步：本文此前把 M1 标为"待真实请求验证"，与集成测试已全绿的事实不符；本次一并修正。
 
@@ -682,6 +727,8 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.10）→ `buil
 | 2026-11-25 | **`/chat` 带上工具 + 思考入日志**：`complete(messages, tools=registry.definitions())`（`main.py` 295→317 行、`types.py` 269→278、`openai_compat.py` 357→367）。实测同一问题 input_tokens 9→991、模型正确点名 5 个工具；问"读 README"返回 `read_file` 的 `tool_calls`（`stop_reason=tool_use`）且 `note` 提示未执行。`Completion` 新增 `reasoning` 字段，`decode_response` 认 `reasoning_content`/`reasoning`，日志新增 `[think]` 行，`ChatResponse` 新增 `reasoning`。顺手修掉 `.env` 里 `eebcafAGENTLAB_MODEL=` 的误粘贴前缀（此前 model 配置实际未生效，只是恰好等于默认值） |
 | 2026-11-25 | 新增根目录 `serve.sh`：后台启动 + 按启动时间生成日志文件（`log/YYYY-MM-DD_HH-MM-SS.log`），`log/` 进 `.gitignore`。实测两次启动生成 `17-43-32.log` 与 `17-43-38.log`，各自独立；启动失败时脚本打印日志末尾并非零退出 |
 | 2026-11-24 | **工具接进服务**（`main.py` 240→295 行）：`lifespan` 里建 `ToolRegistry()` 并用 `make_file_tools(Path.cwd())` 注册 5 个工具，挂 `app.state.registry`；新增 `GET /tools`（`response_model=list[ToolDefinition]`，复用 dataclass 不立镜像类）；`/health` 加 `tools` 计数；`_setup_logging()` 改为幂等（`--reload` 子进程的 lifespan 也会装 handler）。实测启动日志打印"工作区 + 5 个工具名"，`/tools` 返回 5 项完整 Schema，`/chat` 829ms 正常，`openapi.json` 里三个路径都在 |
+| 2026-11-26 | **命名清理**：logger 统一到模块导入路径（`agentlab.main` / `agentlab.loop` / `agentlab.tools`），修掉 `myagent` / `myagent.tools` 不在 `agentlab` 层级下、一旦加日志就绕过 handler 的隐患；`Agent` / `AgentResult` 字段与循环内变量改为 `system_prompt` / `last_llm_text` / `total_usage` / `tool_calls` / `tool_results`；`[chat]` 日志键 `q=` → `user=` |
+| 2026-11-26 | **新增 `agentlab/session.py`（125 行）：会话**（`main.py` 325→378 行、`loop.py` 143→155 行、前端约 14 KB）。`SessionStore` 按 `session_id` 存历史；`Session.trim()` 保证 `system` 不丢、`assistant(tool_calls)` 与其 `tool` 结果成对丢弃；每会话一把 `asyncio.Lock` 罩住"读历史 → 跑任务 → 写回"。`Agent.run()` 加 `history` 参数；`/chat` 新增 `session_id` / `history_messages`，续聊时不再重复传 `system`（首轮定）。实测：同 id 第二句 `hist=2` 答出上一轮的名字、不同 id 说不知道；裁剪 37→10 条且零孤立 `tool`；并发两请求 `hist` 为 0 与 7 而非两个 0。发现新问题：模型会 `grep log/` 读别的会话日志，已记入已知问题（`policy.py` 处理） |
 
 ### 2026-11-18 的两条调整
 
@@ -705,9 +752,11 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.10）→ `buil
 | 问题 | 影响 | 处理 |
 |---|---|---|
 | 没有自动化测试 | 重构时缺回归保护，改坏不会立刻报警 | 刻意如此（M5 再补）；当前每步都现场跑真实请求验证 |
-| 请求之间没有会话 | 每次 `/chat` 从零开始，"继续改一下"没有上下文 | `session.py` 存 messages（M4 第一项），注意 tool 消息必须与 `tool_calls` 成对截断 |
-| 长任务同步等待 | 多轮工具调用期间前端无输出，直到最终回答 | `/chat/stream`（SSE）把每轮进度推出去（M4 第二项） |
-| 工具结果会撑爆上下文 | 读大文件后 input tokens 快速上涨（实测单任务已 2200+） | `context.py` 压缩早期工具结果（M4 第三项） |
+| 会话不持久 | 进程重启后所有会话清空；上限 100 个会话、每会话 60 条消息（按条数不按 token） | 有意的第一版取舍；落盘与 token 预算分别留给后续版本与 `context.py` |
+| 会话无鉴权 | 知道 `session_id` 就能接上别人的对话 | 单机自用可接受；对外开放前必须加身份校验 |
+| **工具能读到 `log/` 里的历史对话** | 实测模型为回答"我叫什么"去 `grep log/`，从别的会话日志里翻出了名字——等于绕过会话隔离 | 需要 `policy.py` 做目录黑名单（M4 剩余项）；当前靠"只在可信目录跑" |
+| 长任务同步等待 | 多轮工具调用期间前端无输出，直到最终回答 | `/chat/stream`（SSE）把每轮进度推出去（M4 剩余项） |
+| 工具结果会撑爆上下文 | 读大文件后 input tokens 快速上涨（实测单任务已 2200+，会话续聊后还会叠加） | `context.py` 压缩早期工具结果（M4 剩余项） |
 | 每次验证都花一次真实调用 | 调试时频繁重启 + curl 会累积费用 | 已确认接受；请求都极短，成本以分计 |
 | Python 3.14 较新 | 个别第三方库可能没有适配 | 目前依赖均正常 |
 | 开发机文件工具异常 | DSH 的文件编辑工具无法覆盖 WSL 路径下的已有文件，只能用脚本改写 | 环境问题，与项目无关；不影响 GitHub 上传 |

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .llm.base import LLMClient
@@ -28,6 +29,9 @@ log = logging.getLogger("agentlab.loop")
 
 _THINK_LIMIT = 300
 """日志里思考的截断长度。全文在 Completion.reasoning，日志只要够定位。"""
+
+_TOOLS_LIMIT = 120
+"""日志里工具名列表的截断长度。并行调 10 个工具也不会把一行撑爆。"""
 
 
 class StepLimitError(RuntimeError):
@@ -76,8 +80,13 @@ class Agent:
     system_prompt: str | None = None
     max_steps: int = 10
 
-    async def run(self, user_input: str) -> AgentResult:
-        messages = self._start(user_input)
+    async def run(
+        self,
+        user_input: str,
+        history: Sequence[Message] = (),
+    ) -> AgentResult:
+        """跑一次任务。`history` 是之前几轮的消息，`None`/空表示从零开始。"""
+        messages = self._start(user_input, history)
         # 工具清单在整个任务期间不变，循环外取一次即可；
         # 每轮都调 definitions() 会白白重建一遍 Schema。
         tools = self.registry.definitions()
@@ -96,11 +105,14 @@ class Agent:
             tool_calls = completion.message.tool_calls()
             if completion.reasoning:
                 log.info("[think] step=%d %s", step, _clip(completion.reasoning))
+            # 工具轮连工具名一起打：排查"它到底调了什么"时不用回头翻轨迹。
+            # 收工轮没有工具，打 "-" 占位，各行列数一致才好扫。
+            tool_names = ",".join(call.name for call in tool_calls) or "-"
             log.info(
-                "[loop] step=%d stop=%s calls=%d in=%d out=%d cached=%d %dms",
+                "[loop] step=%d stop=%s tools=%s in=%d out=%d cached=%d %dms",
                 step,
                 completion.stop_reason,
-                len(tool_calls),
+                _clip(tool_names, _TOOLS_LIMIT),
                 completion.usage.input_tokens,
                 completion.usage.output_tokens,
                 completion.usage.cached_input_tokens,
@@ -127,10 +139,16 @@ class Agent:
 
         raise StepLimitError(self.max_steps, messages[-1] if messages else None)
 
-    def _start(self, user_input: str) -> list[Message]:
-        messages: list[Message] = []
-        if self.system_prompt:
-            messages.append(Message.system(self.system_prompt))
+    def _start(self, user_input: str, history: Sequence[Message] = ()) -> list[Message]:
+        """组装本轮入场时的消息：历史 + （必要时）system + 本轮 user。
+
+        `list(history)` 先拷一份：调用方传进来的可能是 session 里的 list，
+        直接 append 会改到别人的状态。
+        """
+        messages = list(history)
+        # 历史里已经带 system 就不再插：续聊时 system 由第一轮定，之后忽略新的。
+        if self.system_prompt and not any(m.role == "system" for m in messages):
+            messages.insert(0, Message.system(self.system_prompt))
         messages.append(Message.user(user_input))
         return messages
 
