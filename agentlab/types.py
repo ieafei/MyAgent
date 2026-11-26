@@ -253,6 +253,15 @@ class Completion:
     stop_reason: StopReason
     usage: Usage = Usage()
     model: str = ""
+    reasoning: str | None = None
+    """模型的思考过程（DeepSeek 的 reasoning_content、部分服务的 reasoning）。
+
+    故意放在 Completion 而不是 Message 里：思考不是对话内容，**不能**回传给
+    模型（DeepSeek 对 reasoner 回传 reasoning_content 会直接 400）。它的用途
+    只有一个：让人看见模型"为什么这么答"——日志、审计、排查。
+
+    非推理模型的服务不返回这个字段，此时为 None。
+    """
 
 
 __all__ = [

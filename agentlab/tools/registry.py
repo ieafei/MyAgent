@@ -35,7 +35,7 @@ from agentlab.tools.base import (
 )
 from agentlab.types import ToolCallBlock, ToolDefinition, ToolResultBlock
 
-log = logging.getLogger("myagent.tools")
+log = logging.getLogger("agentlab.tools")
 
 DEFAULT_TIMEOUT_S = 30.0
 """单次工具调用的默认上限。读文件、跑命令都够用；真卡死就说明这次调用本身有问题。"""

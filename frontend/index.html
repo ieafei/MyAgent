@@ -341,6 +341,7 @@ function addMeta(msg, d, clientRtt) {
   meta.className = "meta";
   const items = [
     ["stop", d.stop_reason],
+    ["steps", d.steps],
     ["latency", d.latency_ms + "ms"],
     ["in", d.usage.input_tokens],
     ["out", d.usage.output_tokens],

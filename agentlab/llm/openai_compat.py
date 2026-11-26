@@ -191,6 +191,15 @@ def decode_response(data: dict[str, object], model: str) -> Completion:
     if isinstance(content, str) and content:
         blocks.append(TextBlock(content))
 
+    # 思考过程只取出来看，不进消息：DeepSeek 的 reasoner 明确拒绝回传
+    # reasoning_content（400），放在 Completion 上最安全。
+    reasoning: str | None = None
+    for key in ("reasoning_content", "reasoning"):
+        raw_reasoning = raw_message.get(key)
+        if isinstance(raw_reasoning, str) and raw_reasoning:
+            reasoning = raw_reasoning
+            break
+
     raw_calls = raw_message.get("tool_calls")
     if isinstance(raw_calls, list):
         for raw_call in raw_calls:
@@ -225,6 +234,7 @@ def decode_response(data: dict[str, object], model: str) -> Completion:
         stop_reason=stop_reason,
         usage=_parse_usage(data.get("usage")),
         model=str(data.get("model") or model),
+        reasoning=reasoning,
     )
 
 

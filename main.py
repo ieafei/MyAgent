@@ -6,11 +6,13 @@
 
 职责边界（越界就会长出第二个大泥球）：
 - 只做装配：读 .env、造 client、挂路由、把异常翻译成 HTTP 状态码；
-- 编解码在 llm/openai_compat.py，工具在 tools/，多轮在 loop.py（尚未实现）。
+- 编解码在 llm/openai_compat.py，工具在 tools/，多轮循环在 loop.py。
 
-本次只有三个端点：
-- GET  /health  服务活着、配置读对没
-- POST /chat    单轮对话（模型若要求调工具，原样透出，暂不执行）
+本次有四个端点：
+- GET  /health  服务活着、配置读对没、注册了几个工具
+- GET  /tools   已注册工具清单（和发给模型的是同一份）
+- POST /chat    一次 agent 任务：内部多轮（调模型 → 执行工具 → 回填 → 再调），
+                直到模型给出最终回答或步数用完
 - GET  /        浏览器里的对话测试页（frontend/index.html，无构建、无 CDN）
 """
 
@@ -38,7 +40,10 @@ from agentlab.llm import (
     OpenAIClient,
     RateLimitError,
 )
-from agentlab.types import Message, ToolCallBlock, Usage
+from agentlab.loop import Agent, StepLimitError
+from agentlab.tools.builtin.fs import make_file_tools
+from agentlab.tools.registry import ToolRegistry
+from agentlab.types import ToolCallBlock, ToolDefinition, Usage
 
 # -- 请求 / 响应模型：这就是给人看的接口文档，写清类型，/docs 自动生成 ---------
 
@@ -57,31 +62,49 @@ class ChatResponse(BaseModel):
     """
 
     text: str
+    reasoning: str | None = Field(
+        default=None,
+        description="模型的思考过程（只有推理模型会返回，如 deepseek-reasoner）",
+    )
     tool_calls: list[ToolCallBlock] = Field(
-        description="模型要求调用的工具；arguments 是 JSON 字符串，本端点不解析也不执行",
+        description="模型最后一轮要求调用的工具；任务中的调用都已执行并把结果回填给模型",
     )
     stop_reason: str
     usage: Usage
     model: str
     latency_ms: int
-    note: str | None = Field(
-        default=None,
-        description="能力缺口说明，例如出现 tool_calls 但注册表还没实现",
+    steps: int = Field(
+        default=1,
+        description="本次任务一共调了几轮模型；1 表示一问一答没用到工具",
     )
 
 
 # -- 日志：一条消息一行业务日志，健康探测不刷屏 ---------------------------------
 
-log = logging.getLogger("myagent")
+log = logging.getLogger("agentlab.main")
 
 
 def _setup_logging() -> None:
-    """在 main() 里装 handler，不在 import 时改全局日志配置（被 import 也不该影响调用方）。"""
+    """在 main() 里装 handler，不在 import 时改全局日志配置（被 import 也不该影响调用方）。
+
+    幂等：`--reload` 时 uvicorn 在子进程里只 import 模块、不走 main()，
+    子进程的 lifespan 会再调一次；不判断就会挂两个 handler、每行日志吐两遍。
+    """
+    if log.handlers:
+        return
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
     log.addHandler(handler)
     log.setLevel(logging.INFO)
     log.propagate = False  # 别让 root 再吐一遍
+
+    # agentlab 包自己的日志（loop 的 [loop]/[think]）走同一个 handler：
+    # 库不配 handler 是对的，但"谁接进服务谁负责配"——这里就是装配处。
+    lib_log = logging.getLogger("agentlab")
+    if not lib_log.handlers:
+        lib_log.addHandler(handler)
+        lib_log.setLevel(logging.INFO)
+        lib_log.propagate = False
 
 
 class _QuietHealth(logging.Filter):
@@ -109,6 +132,7 @@ def _brief(text: str, limit: int = 40) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _setup_logging()  # --reload 的子进程只 import 模块、不走 main()
     logging.getLogger("uvicorn.access").addFilter(_QuietHealth())
     # 加载 .env 是"入口"的职责；OpenAIClient.from_env() 只读 os.environ，库不改调用方环境。
     load_dotenv()
@@ -117,6 +141,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except AuthError as exc:
         print(f"[启动失败] {exc}")
         raise
+
+    # 工作区取启动目录。换目录启动 = 换一个工作区，这是有意的：
+    # "在哪个仓库里跑 agent" 该由人启动时的位置决定，不该写死在本文件里。
+    workspace = Path.cwd()
+    registry = ToolRegistry()
+    try:
+        for tool in make_file_tools(workspace):
+            registry.register(tool)
+    except ValueError as exc:  # 重名 / Schema 非法：作者级错误，别带着坏工具启动
+        print(f"[启动失败] {exc}")
+        raise
+    app.state.registry = registry
+    log.info(
+        "[启动] 工作区=%s 工具=%d 个：%s",
+        workspace,
+        len(registry),
+        ", ".join(registry.names()),
+    )
+
     app.state.started_at = time.monotonic()
     yield
     await app.state.client.aclose()
@@ -128,6 +171,12 @@ app = FastAPI(title="MyAgent", version=agentlab.__version__, lifespan=lifespan)
 def _client(request: Request) -> OpenAIClient:
     client: OpenAIClient = request.app.state.client
     return client
+
+
+def _registry(request: Request) -> ToolRegistry:
+    """注册表挂在 app.state 上而不是模块全局：同一个进程测试时可以起多份互不干扰。"""
+    registry: ToolRegistry = request.app.state.registry
+    return registry
 
 
 def _status_for(exc: LLMError) -> int:
@@ -154,6 +203,17 @@ async def _llm_error_handler(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+@app.exception_handler(StepLimitError)
+async def _step_limit_handler(request: Request, exc: Exception) -> JSONResponse:
+    """步数用完不是 bug，是保护。明确告诉调用方"任务没做完"，而不是 200 给半成品。"""
+    assert isinstance(exc, StepLimitError)
+    log.warning("[chat] 步数上限：%s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"type": "StepLimitError", "message": str(exc)}},
+    )
+
+
 # -- 端点 ---------------------------------------------------------------------
 
 
@@ -173,8 +233,24 @@ async def health(request: Request) -> dict[str, object]:
         "status": "ok",
         "version": agentlab.__version__,
         "model": _client(request).model,
+        "tools": len(_registry(request)),
         "uptime_s": round(time.monotonic() - request.app.state.started_at, 1),
     }
+
+
+@app.get(
+    "/tools",
+    response_model=list[ToolDefinition],
+    summary="已注册的工具清单（模型看到的就是这一份）",
+)
+async def tools(request: Request) -> list[ToolDefinition]:
+    """原样返回 registry 的快照，不加工、不排序。
+
+    `/tools` 存在的意义是"所见即所发"：它和主循环传给 `complete(tools=...)` 的
+    是同一个 `definitions()`，所以在这里看到的 Schema 就是模型眼里的 Schema;
+    另立一份给调试用的描述，迟早会和真发出去的那份漂移。
+    """
+    return _registry(request).definitions()
 
 
 def _log_chat(
@@ -183,45 +259,54 @@ def _log_chat(
     stop_reason: str,
     usage: Usage,
     latency_ms: int,
-    tool_calls: int,
+    steps: int,
 ) -> None:
-    """一次真实往返压成一行。原文看响应体，这里只要够定位问题：谁问了、答了什么、花了多少。"""
+    """一次 agent 任务压成一行。中途每轮由 loop 自己打 [loop] / [think]，这里只留摘要。"""
     log.info(
-        "[chat] sys=%s q=%r → %r | stop=%s in=%d out=%d cached=%d tools=%d %dms",
+        "[chat] sys=%s q=%r → %r | stop=%s steps=%d in=%d out=%d cached=%d %dms",
         f"{len(req.system)}字" if req.system else "无",
         _brief(req.text),
         _brief(answer),
         stop_reason,
+        steps,
         usage.input_tokens,
         usage.output_tokens,
         usage.cached_input_tokens,
-        tool_calls,
         latency_ms,
     )
 
 
-@app.post("/chat", response_model=ChatResponse, summary="单轮对话")
+@app.post("/chat", response_model=ChatResponse, summary="一次 agent 任务（内部多轮）")
 async def chat(req: ChatRequest, request: Request) -> ChatResponse:
-    messages: list[Message] = []
-    if req.system:
-        messages.append(Message.system(req.system))
-    messages.append(Message.user(req.text))
-
+    """对外仍是一问一答，内部是完整循环：模型要工具就执行并回填，直到它收工。"""
+    agent = Agent(
+        client=_client(request),
+        registry=_registry(request),
+        system_prompt=req.system,
+    )
     started = time.perf_counter()
-    completion = await _client(request).complete(messages)
+    result = await agent.run(req.text)
     latency_ms = int((time.perf_counter() - started) * 1000)
 
-    calls = list(completion.message.tool_calls())
-    usage = completion.usage
-    _log_chat(req, completion.message.text(), completion.stop_reason, usage, latency_ms, len(calls))
+    # 轨迹最后一条是模型的收尾回答；正常收工时它没有工具调用。
+    last_calls = list(result.messages[-1].tool_calls()) if result.messages else []
+    _log_chat(
+        req,
+        result.last_llm_text,
+        result.stop_reason,
+        result.usage,
+        latency_ms,
+        result.steps,
+    )
     return ChatResponse(
-        text=completion.message.text(),
-        tool_calls=calls,
-        stop_reason=completion.stop_reason,
-        usage=completion.usage,
-        model=completion.model or _client(request).model,
+        text=result.last_llm_text,
+        reasoning=result.reasoning,
+        tool_calls=last_calls,
+        stop_reason=result.stop_reason,
+        usage=result.usage,
+        model=result.model or _client(request).model,
         latency_ms=latency_ms,
-        note=("模型要求调用工具，但工具注册表还没实现，本次只透出参数" if calls else None),
+        steps=result.steps,
     )
 
 

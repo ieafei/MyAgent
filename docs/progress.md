@@ -9,15 +9,15 @@
 
 | 项 | 值 |
 |---|---|
-| 当前阶段 | **M2 进行中**：工具协议 ✅ → 注册表 ✅，下一步内置文件工具 |
-| 已完成文件 | `agentlab/` 下 10 个（`__init__`、`types`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（服务入口）+ `frontend/index.html`（对话测试页） |
-| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置，`/chat` 单轮对话实测 1.2s 拿到真实回答，`/docs` 点按钮可用，**`/` 打开网页版对话测试台**；`ToolRegistry` 可在内存里完整跑通一次工具调用（尚无端点、也还没有真实工具） |
+| 当前阶段 | **M3 完成**：工具协议 ✅ → 注册表 ✅ → 内置文件工具 ✅ → 接进服务 ✅ → `loop.py` 主循环 ✅；`/chat` 已是完整 agent 任务，下一步做会话与流式（M4） |
+| 已完成文件 | `agentlab/` 下 11 个（`__init__`、`types`、`loop`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（服务入口）+ `frontend/index.html`（对话测试页） |
+| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置与工具数，`/tools` 列出 5 个已注册文件工具（与发给模型的是同一份 Schema）。**`/chat` 已是完整 agent 任务**：模型要工具就并行执行、结果回填、再问一轮，直到它给出最终回答；实测"读 README 并概括"自动跑 2 轮（`steps=2`），读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽返回 500 `StepLimitError`。模型 `deepseek-flash` 的思考逐轮写进 `[think]` 日志行与响应 `reasoning` 字段（是否返回由服务端决定，工具轮次时有时无）。`/docs` 点按钮可用，**`/` 打开网页版对话测试台** |
 | 测试 | 无 pytest 用例（4 个集成测试已按决定删除）；验证方式改为"重启服务 + 网页/curl"，纯逻辑文件用 `/tmp` 脚本跑真实输出 |
-| 代码规模 | 源码约 1800 行（types 269 / llm 575 / tools 435 / builtin 518 / 包入口 3）+ `main.py` 240 行 + `frontend/index.html` 13.7 KB |
+| 代码规模 | 源码约 2030 行（types 278 / llm 585 / tools 435 / builtin 518 / loop 143 / 包入口 7）+ `main.py` 325 行 + `frontend/index.html` 13.7 KB |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / fastapi / uvicorn / ruff / mypy / types-jsonschema；`pytest` 仍在 dev extras 里，仓库暂无测试文件） |
 
-一句话：**工具从"模型说"到"真执行"的五道守门已经落地（`registry.py`），下一步写 `tools/builtin/fs.py` 给出第一批能真跑的工具，再接 `loop.py` 让 `/chat` 闭环。**
+一句话：**`/chat` 已经是能自己调工具的 agent——模型说"读这个文件"，它就真读、真把内容拿回来再回答；下一步把每次请求变成可持续的会话。**
 
 ---
 
@@ -25,12 +25,13 @@
 
 ```
 MyAgent/
-├── main.py              ← ✅ 服务主入口（175 行）：/ + /health + /chat
+├── main.py              ← ✅ 服务主入口（325 行）：/ + /health + /tools + /chat
 ├── frontend/
 │   └── index.html          ← ✅ 对话测试台（13.2 KB，单文件、零构建、无 CDN）
 ├── agentlab/               ← Python 包
-│   ├── __init__.py         ← 只声明版本号
+│   ├── __init__.py         ← ✅ 版本号 + 导出 Agent / AgentResult / StepLimitError
 │   ├── types.py            ← ✅ 数据契约（OpenAI 格式）
+│   ├── loop.py             ← ✅ agent 主循环：调模型 → 执行工具 → 回填 → 再调（143 行）
 │   ├── llm/                ← 模型适配层
 │   │   ├── __init__.py     ← ✅ 导出契约
 │   │   ├── base.py         ← ✅ 错误分类 + LLMClient 接口
@@ -234,7 +235,7 @@ ResponseFormatError: 响应里没有 choices：{"error": "something"}
 Authorization: Bearer sk-fake
 请求 messages: [{'role': 'user', 'content': '你好'}]
 请求带 tools : True
---> Completion: tool_use deepseek-chat Usage(input_tokens=1200, output_tokens=30, cached_input_tokens=1024)
+--> Completion: tool_use deepseek-flash Usage(input_tokens=1200, output_tokens=30, cached_input_tokens=1024)
 aclose() 后注入的 client 仍可复用: True
 
 AuthError (status=401, retryable=False): 鉴权失败(401)：检查 AGENTLAB_API_KEY 是否正确、是否过期 | {"error":{"message":"Invalid API key"}}
@@ -332,46 +333,125 @@ ValueError: head_ratio 必须在 (0, 1) 之间，收到 1.5
 
 ---
 
-### 3.7 `main.py`（服务主入口，175 行）
+### 3.7 `main.py`（服务主入口，317 行）
 
 一句话职责：**把库装配成一个一直开着的服务**，让"新增一个能力 → 重启 → 发一条请求"成为验证方式。断言只能证明"没坏"，服务才能证明"能用"：模型怎么答、花了多少 token、工具有没有真被调用，全都看得见。
 
-本次只有两个端点：
+四个端点：
 
 | 端点 | 作用 |
 |---|---|
-| `GET /health` | 活着吗？`version` / `model` / `uptime_s` |
-| `POST /chat` | 单轮对话，返回 `text` / `tool_calls` / `stop_reason` / `usage` / `latency_ms` |
+| `GET /health` | 活着吗？`version` / `model` / `tools` / `uptime_s` |
+| `GET /tools` | 已注册工具清单：`registry.definitions()` 原样返回 |
+| `POST /chat` | 一次 agent 任务（内部多轮），返回 `text` / `reasoning` / `tool_calls` / `stop_reason` / `usage` / `steps` / `latency_ms` |
+| `GET /` | 网页版对话测试台（`include_in_schema=False`，不进 `/docs`） |
 
-真实输出（`python main.py --port 8123` 之后）：
+真实输出（`python main.py --port 8011` 之后）：
 
 ```
-$ curl -s 127.0.0.1:8123/health
-{"status":"ok","version":"0.1.0","model":"deepseek-chat","uptime_s":3.1}
+INFO:     [启动] 工作区=/home/afei/MyAgent 工具=5 个：read_file, write_file, edit_file, list_files, grep
 
-$ curl -s 127.0.0.1:8123/chat -H 'content-type: application/json' \
-       -d '{"text":"用一句话说明你是谁"}'
-{"text":"我是DeepSeek，由深度求索公司创造的AI助手……","tool_calls":[],"stop_reason":"end_turn",
- "usage":{"input_tokens":8,"output_tokens":29,"cached_input_tokens":0},
- "model":"deepseek-flash","latency_ms":1215,"note":null}
+$ curl -s 127.0.0.1:8011/health
+{"status":"ok","version":"0.1.0","model":"deepseek-flash","tools":5,"uptime_s":5.0}
 
-$ curl -s -o /dev/null -w '%{http_code}' 127.0.0.1:8123/chat \
+$ curl -s 127.0.0.1:8011/tools
+工具数: 5
+- read_file  参数: ['path', 'offset', 'limit']  必填: ['path']
+- write_file 参数: ['path', 'content']  必填: ['path', 'content']
+- edit_file  参数: ['path', 'old_text', 'new_text']  必填: ['path', 'old_text', 'new_text']
+- list_files 参数: ['path', 'depth']  必填: []
+- grep       参数: ['pattern', 'path', 'glob', 'max_matches']  必填: ['pattern']
+（每项完整内容：name / description / parameters，其中 parameters 就是
+ "type": "object" + properties + required + "additionalProperties": false 那份 JSON Schema）
+
+$ curl -s -X POST 127.0.0.1:8011/chat -H 'content-type: application/json' \
+       -d '{"text":"读一下 README.md 的前 5 行，用一句话概括"}'
+{"text":"README.md 前 5 行说明：这是一个名为 MyAgent 的项目，它不用任何 agent 框架…",
+ "reasoning":"<推理模型才有，可能是 null>","tool_calls":[],"stop_reason":"end_turn",
+ "usage":{"input_tokens":2207,"output_tokens":140,"cached_input_tokens":1792},
+ "steps":2,"latency_ms":1876}
+   ↑ steps=2：第 1 轮模型要 read_file → 执行 → 结果回填；第 2 轮才给出总结。
+     tool_calls 为空是因为**最后一轮**没有调用，任务中的调用都已执行完
+
+$ curl -s -X POST 127.0.0.1:8011/chat -H 'content-type: application/json' \
+       -d '{"text":"9.11 和 9.9 哪个大？只答结论"}'
+{"text":"9.9 大。","reasoning":"The user asks: which is bigger…","stop_reason":"end_turn","steps":1,…}
+
+一个任务在日志里的形状（每轮一行 [loop]，收尾一行 [chat]）：
+INFO:     [think] step=2 Read the first 10 lines. Now summarize in one sentence…
+INFO:     [loop] step=1 stop=tool_use calls=1 in=1021 out=55 cached=768 882ms
+INFO:     [loop] step=2 stop=end_turn calls=0 in=1186 out=85 cached=1024 990ms
+INFO:     [chat] sys=无 q='读一下 README.md 的前 5 行，用一句话概括' → 'README.md 前 5 行说明：…' | stop=end_turn steps=2 in=2207 out=140 cached=1792 1876ms
+
+`deepseek-flash` 默认带思考（`reasoning_effort=high`），但服务端**不保证每轮都给**：
+实测同一工具任务连发 3 次，只有 1 次的第二轮带 `reasoning_content`。日志里有就记，没有就跳过。
+
+$ curl -s -o /dev/null -w '%{http_code}' 127.0.0.1:8011/chat \
        -H 'content-type: application/json' -d '{}'
 422        ← pydantic 直接挡掉缺 text 的请求，不浪费一次模型调用
+
+$ curl -s 127.0.0.1:8011/openapi.json | ... → 路径: ['/health', '/tools', '/chat']
 ```
+
+`/tools` 用 `response_model=list[ToolDefinition]`，直接复用 `types.py` 的 dataclass，不另立 `ToolInfo` 镜像类——理由同 2026-11-23 删 `UsageOut` 那次：写两遍必然漂移。
 
 设计要点：
 
 - **只做装配**：读 `.env`、造 client、挂路由、把异常翻成状态码。编解码在 `llm/`、工具在 `tools/`、多轮在 `loop.py`，都不进这里。
 - **`load_dotenv()` 放在入口**：库只读 `os.environ` 这条边界不破——改进程环境是入口的职责。
 - **client 进程内复用**：`lifespan` 里建一次、退出时 `aclose()`。请求级新建会把连接池的复用全丢掉，每次都重新 TLS 握手。
+- **注册表也在 `lifespan` 里建**：`ToolRegistry()` + `make_file_tools(Path.cwd())`。注册失败（重名 / Schema 非法）直接抛，服务起不来——作者级错误不该等模型点到才发现。挂 `app.state.registry` 而非模块全局：测试时可以起多份互不干扰。
+- **工作区取启动目录**：`Path.cwd()`。换目录启动就是换一个工作区，该由人决定，不写死在文件里；启动日志把工作区与工具名一起打出来，避免"以为在 A 目录其实在 B"。
 - **异常翻译成状态码**：`AuthError→401`、`BadRequestError→400`、`RateLimitError→429`、`NetworkError→503`、其余 `502`，body 统一 `{"error": {"type", "message"}}`。调用方看状态码就知道是谁的问题。
 - **`arguments` 原样透出**：它是 JSON 字符串，解析与校验是注册表的职责，路由不越界。
-- **`note` 字段坦白缺口**：模型要求调工具而注册表还没实现时，明确写"本次只透出参数"；接上 registry 后它自然变 `null`。
-- **`model` 两侧可能不一致**：`/health` 报的是环境变量里的 `deepseek-chat`，`/chat` 报的是服务端回显的 `deepseek-flash`。以回显为准，别以为配错了。
+- **思考放 `Completion.reasoning`，不进 `Message`**：DeepSeek 的 reasoner 明确拒绝回传 `reasoning_content`（400），塞进消息迟早有人把它发回模型。日志里独立一行 `[think]`（截 300 字），全文在响应的 `reasoning` 字段；`decode_response` 同时认 `reasoning_content` 与 `reasoning` 两个键名。
+- **`steps` 字段暴露循环深度**：1 = 一问一答没用到工具，>1 = 主循环执行过工具。`tool_calls` 只反映最后一轮；任务中真正执行过的调用在 `loop.py` 的 `[loop]` 日志与轨迹里。
+- **步数上限翻成 500**：`StepLimitError` 单独挂 handler，返回 `{"error": {"type": "StepLimitError", ...}}`，不静默给半成品。
+- **`model` 是服务端回显，可能是别名**：`GET /models` 只列 `deepseek-flash`（DeepSeek-V4.1-Flash）与 `deepseek-v4-pro`；写 `deepseek-chat` / `deepseek-reasoner` 也能通，回显统一是 `deepseek-flash`（网关的旧名映射）。判据以 `/models` 的 id 为准。
+- **思考在工具调用时可能缺席**：`deepseek-flash` 的 `reasoning_effort` 默认 `high`，实测纯问答返回 `reasoning_content`，而发起 `tool_calls` 时该字段为空；把 effort 降到 `low` 则工具场景也返回。客户端目前不透传 `reasoning_effort`，用默认值。
 - **`--reload` 需要 `watchfiles`**：当前只装了纯 `uvicorn`，要用它得先 `uv pip install watchfiles`；否则手动 Ctrl-C 重启。
+- **`_setup_logging()` 幂等**：`--reload` 时子进程只 import 模块、不走 `main()`，所以 `lifespan` 里也调一次。不判空就会挂两个 handler、每行日志吐两遍。
 
-### 3.8 `frontend/index.html`（对话测试台，13.2 KB）
+### 3.8 `agentlab/loop.py`（文件 7 / 143 行）：agent 主循环
+
+一句话职责：**把"模型说要调工具"变成"工具真的被调用、结果真的回到模型"**。前面所有文件都在为这 40 行循环做准备。
+
+核心只有四个动作，跑在 `max_steps` 上限内：
+
+```python
+completion = await self.client.complete(messages, tools=tools)
+tool_calls = completion.message.tool_calls()
+messages.append(completion.message)
+if not tool_calls:
+    return AgentResult(...)                     # 收工
+tool_results = await self.registry.execute_all(tool_calls)
+messages.extend(Message.from_tool_results(tool_results))
+```
+
+命名约定：`last_llm_text`（最后一轮回答，区别于 `messages` 里的中间文本）、`system_prompt`、`total_usage`、`tool_calls`、`tool_results`——变量名带前缀是为了在 `run()` 里一眼看出"这是哪一层的什么"。
+
+设计决策：
+
+- **先入历史再判断收工**：`messages.append(completion.message)` 写在 `if not tool_calls` 之前，收工时轨迹里也带着最后一条 assistant，回放不缺尾巴。
+- **`tools` 在循环外取一次**：工具清单在任务期间不变，每轮重建 Schema 是纯浪费。
+- **并行执行靠 `execute_all`**：一条 assistant 消息可以带多个 `tool_calls`，串行等于把延迟相加；保序与配对由注册表负责。
+- **步数用完抛 `StepLimitError`**：不返回半成品。真正要防的不是模型笨，而是它在两个工具之间来回试探、每轮都以为有进展。
+- **usage 累加**：`Usage.__add__` 早就在 types 里，账要算整个任务（`total_usage`），不是最后一轮。
+- **思考每轮打 `[think]`（截 300 字）**：模型"为什么这么答"是排查选错工具的第一手材料；服务端不给就跳过。
+
+实测（真实模型 + 真实文件系统，`/tmp/verify_loop.py`）：
+
+| 用例 | 结果 |
+|---|---|
+| 读 README 前 20 行并概括 | steps=2，轨迹 user → assistant(read_file) → tool → assistant(总结) |
+| 读不存在的文件 | steps=2，模型并行调 read_file + list_files，拿到错误后改用 list_files 的结果回答，没有崩 |
+| `max_steps=1` 的任务 | 抛 `StepLimitError`，`last_message` 是最后一条 tool 结果 |
+
+一个真实的坑：`agentlab` 的 logger 默认没人配 handler，`[loop]`/`[think]` 会静默丢失。`main._setup_logging()` 里把 handler 同时挂到 `agentlab` logger——库不配 handler 是对的，"谁接进服务谁负责配"。
+
+logger 命名已统一到**模块导入路径**：`agentlab.main`（入口）、`agentlab.loop`、`agentlab.tools`。此前 `main.py` 用 `myagent`、`registry.py` 用 `myagent.tools`——项目早期叫 MyAgent 的遗留，`myagent.tools` 不在 `agentlab` 层级下，一旦往里加日志就会绕过 handler 静默丢失。
+
+### 3.9 `frontend/index.html`（对话测试台，13.2 KB）
 
 一句话职责：**让人用鼠标就能把 `/chat` 的每条返回都看全**，不用背 curl 参数。
 
@@ -387,13 +467,13 @@ $ curl -s -o /dev/null -w '%{http_code}' 127.0.0.1:8123/chat \
 | `cached N`（黄色） | DeepSeek 上下文缓存命中的 token 数 | 为后面做成本控制留观测点 |
 | 工具调用块 | 模型要求调用的工具名、id、`arguments` 原文 | `arguments` 故意不解析——注册表没实现前，看原文才知道模型想干什么 |
 | 失败气泡 | `HTTP 状态码 + error.type + message` | 401/404/422/503 的区分直接体现在颜色和文案上 |
-| `note` 黄条 | 后端声明的能力缺口 | 例如"要求调工具但注册表还没实现" |
+| `steps` | 本次任务跑了几轮模型 | 1 = 没用到工具；>1 = 执行过工具调用 |
 
 几个体验细节：Enter 发送、Shift+Enter 换行（中文输入法组合中不误发）、输入框随内容长高、请求中禁用发送并显示三个点、system prompt 存在 `localStorage` 里免重输、"清空"重置会话与统计。
 
 验证：`curl -s -o /dev/null -w '%{http_code}' localhost:8000/` → `200`；`node --check` 检查内联 JS 无语法错误；`/docs` 不受影响（307→`/docs`，仍 200）。
 
-### 3.9 `agentlab/tools/registry.py`（文件 5 / 226 行）
+### 3.10 `agentlab/tools/registry.py`（文件 5 / 226 行）
 
 一句话职责：**把"模型说了一句 tool_call"变成"一条可以回填给模型的 tool 结果"**，中间六道守门（下表把"兜异常"拆成两行说）：
 
@@ -461,7 +541,7 @@ RuntimeError: 数据库连接串拼错了          ← traceback 只进日志
 - **`max_chars` 管整块文本**：截断前先让出 300 字符给提示语和截断标记，否则"截到 24000"实际回填 24300。行对齐本身还有几十字符误差，见 `truncate_output`。
 - **诚实记录**：`execute_all` 目前是 `gather` 全并发，没有并发上限——一轮里几十个调用时会同时开几十个协程，等 `fs.py` 落地后按需加信号量。
 
-### 3.10 `agentlab/tools/builtin/fs.py`（文件 6 / 509 行）
+### 3.11 `agentlab/tools/builtin/fs.py`（文件 6 / 509 行）
 
 一句话：**五个能真碰磁盘的工具，共用一份工作区检查。**
 
@@ -525,27 +605,25 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 真实请求已验证（经 `/chat` 实测） |
-| M2 | `tools/` 工具系统 + 文件工具 | 🟢 `base.py` ✅、`registry.py` ✅、`builtin/fs.py` ✅，待接进 `main.py` |
-| M3 | `loop.py` 主循环 | ⬜ |
+| M2 | `tools/` 工具系统 + 文件工具 | ✅ 完成：`base.py` / `registry.py` / `builtin/fs.py`，已接进 `main.py`（`/tools` 可查） |
+| M3 | `loop.py` 主循环 | ✅ 完成：`Agent.run()` 调模型 → 执行工具 → 回填 → 再调，`/chat` 已接（返回 `steps`） |
 | M4 | `context.py` / `policy.py` / `session.py` / `cli.py` | ⬜ |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 ---
 
-## 5. 下一步：把工具接进服务（改 `main.py`）
+## 5. 下一步：会话与流式（M4）
 
-`tools/base.py`（3.6）、`registry.py`（3.9）、`builtin/fs.py`（3.10）都已完成，但这套东西现在**只有 `/tmp` 脚本能碰到**——服务里还没有任何工具。按 2026-11-20 的约定，下一步必须让它通过服务可见：
+M3 已完成：`/chat` 内部就是 agent 循环，`steps` 告诉你在轨迹里跑了几轮。还没做的是**跨请求的会话**——现在每次 `/chat` 都是一次性任务，第二句"继续改一下"没有上下文。下一步：
 
-1. `lifespan` 里建 `ToolRegistry()`，用 `make_file_tools(Path.cwd())` 注册五个工具，挂到 `app.state.tools`。
-2. 新增 `GET /tools`：返回 `registry.definitions()`，用 `BaseModel` + `Field(description=...)` 写好响应模型，保证能在 `/docs` 里点出来。
-3. 服务重启后用 curl 打 `/tools`，把**请求与响应原文**贴进讲解——这是约定第 4 条要求的"看见完整往返"。
+1. `session.py`：按 `session_id` 存 messages，请求带着 id 续上历史。注意 `assistant(tool_calls)` 与 `tool` 结果必须成对出现，截断历史时不能只删一半（OpenAI 会 400）。
+2. `/chat/stream`：SSE 把每轮 `[loop]`、工具调用、最终回答推给前端；现在同步接口在长任务上会长时间没有响应。
+3. `context.py`：输入 token 超预算时压缩早期工具结果（`ToolResultBlock.content` 最容易爆），而不是粗暴截断消息。
 
-这一步先不碰 `/chat`：`/chat` 要真正闭环还得有 `loop.py`（多轮 tool_use 循环），那是再下一步。届时 3.7 里 `note="注册表还没实现"` 那句可以删掉。
+工具侧遗留口子（现在已经真会执行，风险从"潜在"变"现实"）：
 
-工具侧还留了两个已知口子，等接线时一并处理或明确推迟：
-
-- `execute_all` 是 `gather` 全并发、无上限（3.9 已记录）。接入前先确认单轮工具调用数量，必要时加信号量。
-- `write_file` 非原子写（3.10 已记录）。默认工作区是 `Path.cwd()`，先只在可信目录跑。
+- `execute_all` 是 `gather` 全并发、无上限（3.10 已记录）。单轮工具数量大时加信号量。
+- `write_file` 非原子写（3.11 已记录）。默认工作区是 `Path.cwd()`，先只在可信目录跑。
 
 ### M1 验收清单（8 项全部有真实证据）
 
@@ -562,7 +640,7 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 
 **2026-11-20 已收尾**：先由 4 个集成用例打真网络验证（已按决定删除），再由 `main.py` 的 `/chat` 端点复验——`stop_reason=end_turn`、`usage` 齐备、`latency_ms=1215`（见 3.7）。`arguments` 透传与 `role="tool"` 回填两条，等 `registry.py` 接上后在服务里再走一遍。
 
-M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.9）→ `builtin/fs.py` ✅（3.10），下一个是改 `main.py` 把工具接进服务。仍然一次一个文件。
+M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.10）→ `builtin/fs.py` ✅（3.11），下一个是改 `main.py` 把工具接进服务。仍然一次一个文件。
 
 > 文档同步：本文此前把 M1 标为"待真实请求验证"，与集成测试已全绿的事实不符；本次一并修正。
 
@@ -599,6 +677,11 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.9）→ `built
 | 2026-11-23 | 新增 `agentlab/tools/registry.py`（226 行）：`ToolRegistry` 六道守门（查表 / 解析 / Schema 校验 / 超时 / 兜异常 / 截断），`execute` 单发、`execute_all` 并行保序。`/tmp/verify_registry.py` 11 组用例全绿；ruff、mypy 通过（新增 dev 依赖 `types-jsonschema`） |
 | 2026-11-23 | 新增 `agentlab/tools/builtin/`（`__init__.py` 9 行 + `fs.py` 504 行）：`read_file` / `write_file` / `edit_file` / `list_files` / `grep`，共用 `_Workspace` 根目录与越界检查（含软链接逃逸）。`/tmp/verify_fs.py` 20 组用例全绿；ruff、mypy 通过。首版 `list_files` 广度优先导致输出乱序，改为递归深度优先 |
 | 2026-11-24 | `fs.py` 可读性整理（504→509 行）：`_arg_str` / `_arg_int` → `_get_str_arg` / `_get_int_arg`；`_walk` 内部 `visit` → `collect`，返回值统一成"返回 True 表示触到上限"，调用处 `complete = visit(...)` 改为 `truncated = collect(...)`；`display()` 注释改为如实说明——正常结果只给相对路径，但越界报错里仍会带出工作区根 |
+| 2026-11-25 | **新增 `agentlab/loop.py`（143 行）：agent 主循环**（`main.py` 317→325 行、`agentlab/__init__.py` 3→7 行）。`Agent.run()`：`complete(tools)` → 有 `tool_calls` 就 `registry.execute_all()` → `Message.from_tool_results()` 回填 → 再调，最多 `max_steps=10`，用完抛 `StepLimitError`（HTTP 500）。`AgentResult` 带完整轨迹、累计 `usage`、`steps`、`model`、最后一轮 `reasoning`。`/chat` 改调 `Agent`，`ChatResponse` 加 `steps`、删除 `note`。实测：读 README 并概括 `steps=2`；读不存在的文件时模型并行 `read_file`+`list_files`，拿到错误后自纠；`max_steps=1` 正确抛错。顺带修复 `agentlab` logger 无 handler 导致 `[loop]` 日志静默丢失（`_setup_logging` 把 handler 同时挂到 `agentlab` logger） |
+| 2026-11-25 | **切到 `deepseek-flash`**（DeepSeek-V4.1-Flash，1M 上下文，图片输入，默认 `reasoning_effort=high`）：`.env` 的 `AGENTLAB_MODEL` 改为 `deepseek-flash` 后重启，`/health` 回显 `deepseek-flash`，纯问答返回 `reasoning` 并打 `[think]` 日志行（实测 1211ms / in=1022 out=77 / reasoning 96 字）。边界：发起 `tool_calls` 时 effort=high 不返回 `reasoning_content`，effort=low 才带；`GET /models` 只列 `deepseek-flash` 与 `deepseek-v4-pro`，`deepseek-chat` / `deepseek-reasoner` 是网关会映射的旧名 |
+| 2026-11-25 | **`/chat` 带上工具 + 思考入日志**：`complete(messages, tools=registry.definitions())`（`main.py` 295→317 行、`types.py` 269→278、`openai_compat.py` 357→367）。实测同一问题 input_tokens 9→991、模型正确点名 5 个工具；问"读 README"返回 `read_file` 的 `tool_calls`（`stop_reason=tool_use`）且 `note` 提示未执行。`Completion` 新增 `reasoning` 字段，`decode_response` 认 `reasoning_content`/`reasoning`，日志新增 `[think]` 行，`ChatResponse` 新增 `reasoning`。顺手修掉 `.env` 里 `eebcafAGENTLAB_MODEL=` 的误粘贴前缀（此前 model 配置实际未生效，只是恰好等于默认值） |
+| 2026-11-25 | 新增根目录 `serve.sh`：后台启动 + 按启动时间生成日志文件（`log/YYYY-MM-DD_HH-MM-SS.log`），`log/` 进 `.gitignore`。实测两次启动生成 `17-43-32.log` 与 `17-43-38.log`，各自独立；启动失败时脚本打印日志末尾并非零退出 |
+| 2026-11-24 | **工具接进服务**（`main.py` 240→295 行）：`lifespan` 里建 `ToolRegistry()` 并用 `make_file_tools(Path.cwd())` 注册 5 个工具，挂 `app.state.registry`；新增 `GET /tools`（`response_model=list[ToolDefinition]`，复用 dataclass 不立镜像类）；`/health` 加 `tools` 计数；`_setup_logging()` 改为幂等（`--reload` 子进程的 lifespan 也会装 handler）。实测启动日志打印"工作区 + 5 个工具名"，`/tools` 返回 5 项完整 Schema，`/chat` 829ms 正常，`openapi.json` 里三个路径都在 |
 
 ### 2026-11-18 的两条调整
 
@@ -622,7 +705,9 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.9）→ `built
 | 问题 | 影响 | 处理 |
 |---|---|---|
 | 没有自动化测试 | 重构时缺回归保护，改坏不会立刻报警 | 刻意如此（M5 再补）；当前每步都现场跑真实请求验证 |
-| 服务只支持单轮 | 模型给 `tool_calls` 时不会执行，只透出参数并写明 `note` | `registry.py` 接上后可执行，`loop.py` 接上后开 `/agent` |
+| 请求之间没有会话 | 每次 `/chat` 从零开始，"继续改一下"没有上下文 | `session.py` 存 messages（M4 第一项），注意 tool 消息必须与 `tool_calls` 成对截断 |
+| 长任务同步等待 | 多轮工具调用期间前端无输出，直到最终回答 | `/chat/stream`（SSE）把每轮进度推出去（M4 第二项） |
+| 工具结果会撑爆上下文 | 读大文件后 input tokens 快速上涨（实测单任务已 2200+） | `context.py` 压缩早期工具结果（M4 第三项） |
 | 每次验证都花一次真实调用 | 调试时频繁重启 + curl 会累积费用 | 已确认接受；请求都极短，成本以分计 |
 | Python 3.14 较新 | 个别第三方库可能没有适配 | 目前依赖均正常 |
 | 开发机文件工具异常 | DSH 的文件编辑工具无法覆盖 WSL 路径下的已有文件，只能用脚本改写 | 环境问题，与项目无关；不影响 GitHub 上传 |
@@ -648,6 +733,7 @@ python main.py
 
 # 另一个终端：验证
 curl -s 127.0.0.1:8000/health
+curl -s 127.0.0.1:8000/tools          # 已注册的工具清单（模型看到的那一份）
 curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
      -d '{"text":"用一句话说明你是谁"}'
 ```
@@ -655,9 +741,22 @@ curl -s 127.0.0.1:8000/chat -H 'content-type: application/json' \
 浏览器里三个入口：
 
 - <http://127.0.0.1:8000/> —— 对话测试台（推荐）：发消息、看 token/延迟、看错误
-- <http://127.0.0.1:8000/docs> —— 自动生成的接口文档，可点按钮发请求
+- <http://127.0.0.1:8000/docs> —— 自动生成的接口文档（含 `/tools`），可点按钮发请求
 - <http://127.0.0.1:8000/health> —— 纯文本状态
 
 curl 只在"要写进脚本复现"时才用，日常点网页更快。
+
+后台启动用仓库根目录的 `./serve.sh`：每次启动按时间新建一个日志文件（`log/` 已加入 `.gitignore`，不入库）：
+
+```bash
+./serve.sh                 # 默认 127.0.0.1:8000
+./serve.sh --port 8011     # 其余参数原样透传给 main.py
+# 输出：服务已启动 pid=1813741
+#       日志: log/2026-11-25_17-43-38.log
+
+tail -f log/2026-11-25_17-43-38.log
+```
+
+脚本用 `>` 而不是 `>>`：文件名按启动时间唯一，每次启动天然是一份独立日志，排查"这次重启后出的问题"不会被旧内容干扰。没有自动清理，`log/` 大了手工删旧文件即可。
 
 > 注：当前还没有可执行的 CLI。`cli.py` 完成后才能直接 `agentlab "你的任务"`。
