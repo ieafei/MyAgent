@@ -4,11 +4,13 @@
 **不解决**：压缩（`context.py` 的事）、持久化（重启即丢，这版是内存）、鉴权
 （任何人都能猜一个 id 接上去，单机自用够了）。
 
-一个会话就是"一串消息 + 一把锁"：
+一个会话就是"一串消息"：
 
-- 锁不是"一个会话只能有一个任务"的产品限制，而是**同一份历史不能被两个任务同时
-  改写**的技术保护。两个请求各拿一份历史、各写回一份，后写的覆盖先写的——经典的
-  丢写。要"一个会话里并行派生多个任务"，得先把历史分叉（fork 出子会话），不是拆锁。
+- **不带锁。** 锁不是"一个会话只能有一个任务"的产品限制，而是"同一份历史不能被两个
+  任务同时改写"的技术保护。但它属于**调度方**（谁决定并发，谁负责串行），不属于数据
+  对象：CLI 单进程串行，加锁是空转；而且 `asyncio.Lock` 在首次使用时会绑定当时的事件
+  循环，CLI 每个任务一次 `asyncio.run()`，跨循环复用会直接抛 `RuntimeError`。
+  要"一个会话里并行派生多个任务"，得先把历史分叉（fork 出子会话），不是拆锁。
 - 存的是**完整消息**，包括 `assistant(tool_calls)` 和对应的 `tool` 结果。裁剪时
   必须成对丢弃：OpenAI 协议要求每个 `tool_call` 都有配对的 `tool` 消息，只删一半
   下一次请求就 400。
@@ -34,15 +36,24 @@ DEFAULT_MAX_MESSAGES = 60
 class Session:
     """一个会话的全部状态。
 
-    没有 `trim()` 之外的逻辑：怎么存由 `SessionStore` 决定，会话自己只管
-    "我是哪一串消息"和"现在有没有人在用我"。
+    会话自己只管"我是哪一串消息"；怎么持久化、谁来保证串行，都归存储层。
+    CLI 直接持有一个 `Session` 而不经过 `SessionStore`：单进程单会话，不需要那张表
+    （多会话查表、LRU 淘汰），见 goal-and-design 4.14。
     """
 
     id: str
     messages: list[Message] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def append(self, *messages: Message) -> None:
+        """追加一轮任务的**原始**消息。
+
+        只追加、不替换：`context.fit()` 压过的形态是"发送时的视图"，不是历史
+        （4.14 R1）。替换式写入会把早期消息永久抹掉。
+        """
+        self.messages.extend(messages)
+        self.updated_at = time.time()
 
     def trim(self, limit: int) -> int:
         """裁到 `limit` 条以内，返回丢掉的条数。
@@ -86,8 +97,9 @@ class SessionStore:
     async def get_session(self, session_id: str) -> Session:
         """取出会话，没有就建（get-or-create）。
 
-        只用全局锁保护"查表 / 建表"这一小段；真正的任务在 `session.lock` 下跑，
-        不占着全局锁（否则所有会话被迫串行）。
+        全局锁只保护"查表 / 建表"这一小段。**单任务互斥没有实现**：这个 store 目前
+        没有调用者（CLI 直接持有 `Session`），落盘时整体重写成一会话一文件。若要提前
+        把它接回去，得先补上忙标记，否则 `_drop_one_session` 会删掉正在跑的会话。
         """
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -108,10 +120,11 @@ class SessionStore:
         return session.trim(self._max_messages)
 
     def _make_room(self) -> None:
-        """腾出位置：从最久没更新的空闲会话删起，直到低于上限。
+        """腾出位置：从最久没更新的会话删起，直到低于上限。
 
-        全在跑就停手——删掉一个正在跑的会话，它结束时写回的对象已不在表里，等于
-        静默丢对话。宁可暂时超限。
+        注意这里**不区分会话是否正在跑**：`Session` 已不带锁，也没有忙标记。删掉一个
+        正在跑的会话，它结束时会把消息追加到一个已不在表里的对象上，等于静默丢对话。
+        现在没有调用者，所以不会发生；接回去之前必须先补忙标记。
         """
         while len(self._sessions) >= self._max_sessions:
             dropped = self._drop_one_session()
@@ -119,11 +132,10 @@ class SessionStore:
                 break
 
     def _drop_one_session(self) -> bool:
-        """丢掉最久没更新的**空闲**会话；返回 False 表示一个都删不了（全在跑）。"""
-        idle = [s for s in self._sessions.values() if not s.lock.locked()]
-        if not idle:
+        """丢掉最久没更新的会话；返回 False 表示表是空的（没得删）。"""
+        if not self._sessions:
             return False
-        oldest = min(idle, key=lambda s: s.updated_at)
+        oldest = min(self._sessions.values(), key=lambda s: s.updated_at)
         del self._sessions[oldest.id]
         return True
 

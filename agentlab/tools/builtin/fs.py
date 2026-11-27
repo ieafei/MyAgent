@@ -384,7 +384,14 @@ class ListFiles(_WorkspaceTool):
         def collect(directory: Path, level: int) -> bool:
             """递归一层；返回 True 表示触到条目上限，需要一路往回收。"""
             # 目录在前、同类按名字排：输出稳定，模型才能对比两次列目录的差异。
-            children = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+            try:
+                children = sorted(
+                    directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower())
+                )
+            except PermissionError:
+                # 别人的私有目录（/tmp/systemd-private-*、~/.cache 里的 0700）
+                # 不该让整条 list_files 失败：跳过一个目录，比列不出其余 99 个有用。
+                return False
             for child in children:
                 rel = child.relative_to(self._ws.root).as_posix()
                 if child.is_dir():

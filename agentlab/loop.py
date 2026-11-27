@@ -22,6 +22,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .context import DEFAULT_BUDGET_TOKENS, fit
+from .events import (
+    AssistantReplied,
+    Event,
+    EventHandler,
+    StepStarted,
+    ToolCallFinished,
+    ToolCallStarted,
+)
 from .llm.base import LLMClient
 from .tools.registry import ToolRegistry
 from .types import Message, StopReason, Usage
@@ -86,8 +94,14 @@ class Agent:
         self,
         user_input: str,
         history: Sequence[Message] = (),
+        on_event: EventHandler | None = None,
     ) -> AgentResult:
-        """跑一次任务。`history` 是之前几轮的消息，`None`/空表示从零开始。"""
+        """跑一次任务。`history` 是之前几轮的消息，`None`/空表示从零开始。
+
+        `on_event` 是过程中的**通知**（见 `events.py`）：不传就一点额外开销都没有，
+        传了也不改变任何返回值——`AgentResult` 仍然是唯一的权威结果，事件只是让人
+        在等待期间看得见进度。
+        """
         # 发给模型前先按预算压一遍：历史来自 session，可能已经很长，
         # 而一次任务内部还会继续长（每轮的工具结果都追加），不在入口压就会打爆窗口。
         fitted = fit(history, max_tokens=self.max_context_tokens)
@@ -108,6 +122,9 @@ class Agent:
         last_model = ""
 
         for step in range(1, self.max_steps + 1):
+            # 在 `complete()` 之前发：这一行的意思就是"请求已经发出去了"。
+            # 放在之后发，UI 就要等模型回来才知道"刚才在等"——等于没通知。
+            _emit(on_event, StepStarted(step=step))
             started = time.perf_counter()
             completion = await self.client.complete(messages, tools=tools)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -135,10 +152,26 @@ class Agent:
             # 先入历史再判断：收工时 messages 里也带着最后一条 assistant，
             # 否则轨迹缺尾巴，回放时看不出来模型最后说了什么。
             messages.append(completion.message)
+            reply_text = completion.message.text()
+
+            # 事件放在"已入历史"之后发：UI 看到的顺序必须和会话里记的顺序一致，
+            # 将来用事件重放排查时才不会出现"屏幕上先有、历史里后到"。
+            _emit(
+                on_event,
+                AssistantReplied(
+                    step=step,
+                    text=reply_text,
+                    stop_reason=completion.stop_reason,
+                    usage=completion.usage,
+                    model=completion.model,
+                    elapsed_ms=elapsed_ms,
+                    reasoning=completion.reasoning,
+                ),
+            )
 
             if not tool_calls:
                 return AgentResult(
-                    last_llm_text=completion.message.text(),
+                    last_llm_text=reply_text,
                     messages=tuple(messages),
                     usage=total_usage,
                     steps=step,
@@ -147,7 +180,31 @@ class Agent:
                     reasoning=last_reasoning,
                 )
 
+            # 先整批发"要调什么"，再执行，再逐条发结果：执行是并行的，
+            # 开始事件却必须在动手前发完——否则 UI 的顺序会和真实开始时间对不上。
+            for call in tool_calls:
+                _emit(
+                    on_event,
+                    ToolCallStarted(
+                        step=step,
+                        call_id=call.id,
+                        name=call.name,
+                        arguments=call.arguments,
+                    ),
+                )
             tool_results = await self.registry.execute_all(tool_calls)
+            names = {call.id: call.name for call in tool_calls}
+            for block in tool_results:
+                _emit(
+                    on_event,
+                    ToolCallFinished(
+                        step=step,
+                        call_id=block.tool_call_id,
+                        name=names.get(block.tool_call_id, "?"),
+                        chars=len(block.content),
+                        is_error=block.is_error,
+                    ),
+                )
             messages.extend(Message.from_tool_results(tool_results))
 
         raise StepLimitError(self.max_steps, messages[-1] if messages else None)
@@ -169,6 +226,21 @@ class Agent:
 def _clip(text: str, limit: int = _THINK_LIMIT) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _emit(on_event: EventHandler | None, event: Event) -> None:
+    """把事件交给订阅者；订阅者抛错只记日志，不打断任务。
+
+    为什么吞异常：画不出来是 UI 的事，任务本身已经跑完、钱已经花了，不能因为一行
+    print 失败就丢掉结果。吞掉但记日志，至少不是静默——这也是本仓库对"回调"的一贯
+    态度：回调可以坏，主流程不能跟着坏。
+    """
+    if on_event is None:
+        return
+    try:
+        on_event(event)
+    except Exception:  # noqa: BLE001 - 订阅者的任何错都不该冒泡进主循环
+        log.warning("[event] 订阅者抛错，已忽略（任务继续）", exc_info=True)
 
 
 __all__ = ["Agent", "AgentResult", "StepLimitError"]

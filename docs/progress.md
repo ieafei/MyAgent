@@ -9,15 +9,15 @@
 
 | 项 | 值 |
 |---|---|
-| 当前阶段 | **M4 进行中；最终目标已调整为「本地通用 work agent」，不只写代码**（见 goal-and-design 1.1 / 1.4）：形态是 CLI 单进程单会话、agent 常驻、危险动作当场审批。**Web 壳（`main.py` + `frontend/` + `serve.sh`）已删除**，CLI 是唯一对外形态。已落地：M3 主循环 ✅、M4 `session.py` ✅ / `context.py` ✅；权限层已整个撤掉（`policy.py` → `PathRules` → 无，见 3.14），`.env` / `log/` 目前不设防，等 `cli.py` 的审批回路一起重新设计；下一步 `cli.py`（REPL + `on_event`），之后是 `shell` 工具与审批回路、多根授权工作区。SSE 不做 |
-| 已完成文件 | `agentlab/` 下 13 个（`__init__`、`types`、`loop`、`session`、`context`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）（无根目录入口脚本，`cli.py` 是下一步） |
-| 可运行能力 | **没有入口脚本**（Web 壳已删、`cli.py` 未写），当前用一段脚本直调 `Agent.run()`：注册 5 个 fs 工具 → 跑任务 → 打印回答与 `steps`/token（见第 8 节，实测"读 README 前 5 行并概括"跑 2 轮、`steps=2`）。库内能力都已可用：模型要工具就并行执行、结果回填、再问一轮；读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽抛 `StepLimitError`；`session.py` 支持按 `session_id` 续聊（历史成对裁剪、每会话一把锁）；`context.py` 发送前按预算压历史。**工具没有权限层**：`.env`、`log/` 都能读能搜（撤回原因见 3.14，方向是 shell/写操作审批）；只有越界路径仍被 `_Workspace.resolve()` 拦下 |
-| 测试 | 无 pytest 用例（4 个集成测试已按决定删除）；验证方式：纯逻辑文件用 `/tmp` 脚本贴真实输出，端到端用手写脚本调 `Agent.run()`（Web 壳删除后暂无 CLI 入口） |
-| 代码规模 | 源码约 1934 行（types 278 / llm 585 / tools 442 / builtin 527 / loop 174 / session 137 / context 162 / 包入口 7）；`main.py`（378 行）与 `frontend/index.html` 已删除 |
+| 当前阶段 | **M4 进行中；最终目标已调整为「本地通用 work agent」，不只写代码**（见 goal-and-design 1.1 / 1.4）：形态是 CLI 单进程一个 REPL、会话归 session 层、`Agent` 每次 run 重建（4.14）、危险动作当场审批。**Web 壳（`main.py` + `frontend/` + `serve.sh`）已删除**，CLI 是唯一对外形态。已落地：M3 主循环 ✅、M4 `session.py` ✅ / `context.py` ✅ / **`cli.py` ✅（3.15）**；权限层已整个撤掉（`policy.py` → `PathRules` → 无，见 3.14），`.env` / `log/` 目前不设防，等 `shell` 的审批回路一起重新设计；M4 ✅（`on_event` 边跑边说，见变更记录）。下一步是 `shell` 工具、审批回路与多根授权工作区。SSE 不做 |
+| 已完成文件 | `agentlab/` 下 14 个（`__init__`、`types`、`loop`、`session`、`context`、`cli`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）；`agentlab` 命令由 `pyproject.toml` 的 console script 提供 |
+| 可运行能力 | **`agentlab` 命令可用**（3.15）：不带参数进 REPL（一个进程一个会话，历史在内存里，`:q` 退出即丢），带一句话跑完就退出。5 个 fs 工具挂在 `-C/--root` 指定的根（默认 cwd），越界路径由 `_Workspace.resolve()` 拦下。渲染是"过程事件流 + 回答 + 账"：跑的时候就在刷（每步一行、每个工具两行：参数 / 结果字符数），结束时打 Markdown 回答和一行账（步数 / in / out / 缓存 / 耗时）；逐 token 流式不做。错误在 `_run` 里消化成人话：`StepLimitError`、`AuthError`、其他 `LLMError` 各一条，REPL 不退出。库内能力：工具并行执行、结果回填、再问一轮、读错路径会自己改用 `list_files`、`session.py` 按 `session_id` 续聊、`context.py` 按预算压历史。**工具没有权限层**：`.env`、`log/` 都能读能搜（3.14） |
+| 测试 | 无 pytest 用例（4 个集成测试已按决定删除）；验证方式：纯逻辑文件用 `/tmp` 脚本贴真实输出，端到端用 `agentlab "..."` 真跑一条任务并贴输出 |
+| 代码规模 | 源码约 2251 行（types 278 / llm 585 / tools 442 / builtin 527 / loop 174 / session 137 / context 162 / cli 322 / 包入口 7） |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / ruff / mypy / types-jsonschema；`fastapi` / `uvicorn` 已从 `pyproject.toml` 移除，venv 里尚存但不再被 import；`pytest` 仍在 dev extras 里，仓库暂无测试文件） |
 
-一句话：**`agentlab` 已经是一个能自己调工具、能记住上下文、发送前按预算压缩历史、越界路径进不去的库——但它现在没有入口。下一步就是 `cli.py`：一个进程一个会话、agent 常驻、边跑边说、危险动作当场问。**
+一句话：**`agentlab` 现在能在终端里真干活了——`agentlab "把 README 前 3 行概括一下"` 它会自己调 `read_file`、回填结果、给出回答，下一句话还接得上上一句。执行期间屏幕不再静着：第几步、要调什么工具、成了没有，边跑边刷。下一步是 `shell` + 审批（M5）。**
 
 ---
 
@@ -31,6 +31,7 @@ MyAgent/
 │   ├── loop.py             ← ✅ agent 主循环：调模型 → 执行工具 → 回填 → 再调（174 行）
 │   ├── session.py          ← ✅ 会话存储：按 id 存历史 + 成对裁剪 + 每会话一把锁（137 行）
 │   ├── context.py          ← ✅ 上下文预算：超 token 先压早期工具结果，再成对丢消息（162 行）
+│   ├── cli.py              ← ✅ 终端客户端：REPL + 一次性模式 + 轨迹渲染（322 行）
 │   ├── llm/                ← 模型适配层
 │   │   ├── __init__.py     ← ✅ 导出契约
 │   │   ├── base.py         ← ✅ 错误分类 + LLMClient 接口
@@ -733,6 +734,57 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 
 ---
 
+### 3.15 `cli.py`（终端客户端，322 行）
+
+一句话职责：**把前七个文件交到人手里**——装配客户端与工具、跑 REPL、把结果画出来。不做路由、不做鉴权、不做 Web。
+
+三个关键决定：
+
+| 决定 | 为什么 |
+|---|---|
+| **每个任务重建一次 `AsyncClient`** | `asyncio.run()` 每次新建 event loop，而 `httpx.AsyncClient` 绑定 loop。要么把整个 REPL 塞进一个 loop（输入就得走线程），要么每次重建（代价是重连一次 TCP）。选后者：一行 `asyncio.run` 换来 Ctrl-C 干净中断 |
+| **失败那一轮不写历史** | 中断/报错那一轮的半截对话（user + 可能的工具结果）留在历史里，下一轮模型会看到一个"说过但没做完"的任务，反而误导 |
+| **轨迹只画本轮** | 用"最后一条 user 消息"切分，而不是按长度切——`Agent.run` 入场会压缩历史，返回的 messages 可能比传进去的短，按长度切会错位 |
+
+顺手验证的两件事：
+
+- 模型**会自作主张建文件**。第一次跑"记住我叫阿飞"，它直接在工作区写了个 `MEMORY.md`——所以默认 system prompt 里加了一句"不要顺手新建记忆/笔记/TODO 文件，真要落盘先问一句"，复跑改成先问。
+- `-C /tmp` 实测暴露了 `fs.py` 的一个老问题：`list_files` 碰到无权限子目录（`/tmp/systemd-private-*` 那种 0700）会**整条命令失败**（`读目录失败：（Permission denied）`），只回 26 个字符。已改为跳过该目录继续列（`collect()` 里 catch `PermissionError`），复跑同一调用返回 6459 字符。
+
+真实输出（`agentlab "读一下 README.md 的前 3 行，用一句话概括"`）：
+
+```
+README.md 前 3 行是：# MyAgent、空行，以及一句引用语……
+
+  ↳ read_file {"path": "README.md", "limit": 3} → 成功 · 94 字符
+
+2 步 · in 2450 / out 119 · 缓存 2048 · 1434ms · deepseek-flash
+```
+
+多轮（历史确实接上了）：
+
+```
+› 记住数字 42，只回一个字：好
+好
+1 步 · in 1162 / out 50 · 缓存 896 · 1006ms · deepseek-flash
+› 我刚才让你记的数字是多少？只回那个数字
+42
+1 步 · in 1178 / out 118 · 缓存 1024 · 1589ms · deepseek-flash
+```
+
+三条错误路径都不崩（日志里没有 traceback）：
+
+```
+步数用尽：达到最大步数 1，模型仍在调用工具（--max-steps 可调）
+鉴权失败：缺少 AGENTLAB_API_KEY：复制 .env.example 为 .env 并填入 key
+工作区不存在或不是目录：/nope          # 退出码 2
+```
+
+已知缺口：
+
+- **历史不落盘**：进程退出即丢，`--resume` 属于 M6。形态已按 goal-and-design 4.14 定死（会话层落盘 = JSONL 事件、只追加）；R1/R2 已落地（`Session.append` 只追加原始消息，`cli.py` 只持句柄），落盘时只需替换存储实现。
+- Ctrl-C 的"只中断不退出"只在 `timeout -s INT` + 管道下验到"打印提示、没有 traceback"；**真终端里"中断后回到原会话继续聊"没有稳定复现**，下一轮用 pty 或手工验证再补。
+
 ## 4. 尚未开始
 
 | 里程碑 | 内容 | 状态 |
@@ -740,18 +792,17 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 | M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 真实请求已验证 |
 | M2 | `tools/` 工具系统 + 文件工具 | ✅ 完成：`base.py` / `registry.py` / `builtin/fs.py`，由 `make_file_tools()` 一次装配 |
 | M3 | `loop.py` 主循环 | ✅ 完成：`Agent.run()` 调模型 → 执行工具 → 回填 → 再调 |
-| M4 | CLI 客户端（原含会话/上下文，两者已完成） | 🚧 剩 `cli.py` + `Agent.run()` 的 `on_event`；权限层已撤（3.14），审批随 CLI 一起做 |
+| M4 | CLI 客户端、会话、上下文、事件流 | ✅ `cli.py`（3.15）+ `events.py`（见变更记录）；审批随 `shell` 一起做（3.14） |
 | M5 | 泛化：`shell` + 多根授权工作区 + `http` | ⬜ 目标是「不只写代码」，见 goal-and-design 1.1 |
 | M6 | 测试、评测、可观测性 | ⬜ |
 
 ---
 
-## 5. 下一步：CLI（M4 剩余）
+## 5. 下一步：shell + 审批（M5）
 
-已完成：M3 的 `Agent.run()` 主循环，M4 的 `session.py`（按 `session_id` 续聊，历史按会话存、成对裁剪、每会话一把锁，见 3.9）、`context.py`（发送前按 token 预算压历史，见 3.13）。权限层做完又撤了，原因与重新设计的方向见 3.14。剩下：
+已完成：M3 的 `Agent.run()` 主循环，M4 的 `session.py`（3.9）、`context.py`（3.13）、`cli.py`（3.15）、`events.py`（见变更记录）。权限层做完又撤了，原因与方向见 3.14。剩一件事：
 
-1. `cli.py`：终端客户端（`agentlab` 入口已在 `pyproject.toml` 声明，文件还没写）。**目标形态已确定为 Codex CLI 那样**：一个进程 = 一个会话 = 一个常驻 `Agent`，历史在进程内，下一步不再是 SSE；且定位是通用 work agent，不只写代码（下一步的 `shell` 工具与多根工作区就是为此）。
-2. `Agent.run()` 的 `on_event` 钩子：CLI 要边跑边说（工具调用、结果、最终回答），这比 SSE 简单——没有网络、没有事件 schema，回调直接打印。
+1. **`shell` 工具与审批回路**（M5 开头）：`await approve(cmd)` 由 CLI 实现（`input()` 问 y/n），工具只在执行前调用一次；同时定多根工作区的 CLI 形态（`--allow`）。
 
 工具侧遗留口子（现在已经真会执行，风险从"潜在"变"现实"）：
 
@@ -812,7 +863,7 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `buil
 | 2026-11-24 | `fs.py` 可读性整理（504→509 行）：`_arg_str` / `_arg_int` → `_get_str_arg` / `_get_int_arg`；`_walk` 内部 `visit` → `collect`，返回值统一成"返回 True 表示触到上限"，调用处 `complete = visit(...)` 改为 `truncated = collect(...)`；`display()` 注释改为如实说明——正常结果只给相对路径，但越界报错里仍会带出工作区根 |
 | 2026-11-25 | **新增 `agentlab/loop.py`（143 行）：agent 主循环**（`main.py` 317→325 行、`agentlab/__init__.py` 3→7 行）。`Agent.run()`：`complete(tools)` → 有 `tool_calls` 就 `registry.execute_all()` → `Message.from_tool_results()` 回填 → 再调，最多 `max_steps=10`，用完抛 `StepLimitError`（HTTP 500）。`AgentResult` 带完整轨迹、累计 `usage`、`steps`、`model`、最后一轮 `reasoning`。`/chat` 改调 `Agent`，`ChatResponse` 加 `steps`、删除 `note`。实测：读 README 并概括 `steps=2`；读不存在的文件时模型并行 `read_file`+`list_files`，拿到错误后自纠；`max_steps=1` 正确抛错。顺带修复 `agentlab` logger 无 handler 导致 `[loop]` 日志静默丢失（`_setup_logging` 把 handler 同时挂到 `agentlab` logger） |
 | 2026-11-25 | **切到 `deepseek-flash`**（DeepSeek-V4.1-Flash，1M 上下文，图片输入，默认 `reasoning_effort=high`）：`.env` 的 `AGENTLAB_MODEL` 改为 `deepseek-flash` 后重启，`/health` 回显 `deepseek-flash`，纯问答返回 `reasoning` 并打 `[think]` 日志行（实测 1211ms / in=1022 out=77 / reasoning 96 字）。边界：发起 `tool_calls` 时 effort=high 不返回 `reasoning_content`，effort=low 才带；`GET /models` 只列 `deepseek-flash` 与 `deepseek-v4-pro`，`deepseek-chat` / `deepseek-reasoner` 是网关会映射的旧名 |
-| 2026-11-25 | **`/chat` 带上工具 + 思考入日志**：`complete(messages, tools=registry.definitions())`（`main.py` 295→317 行、`types.py` 269→278、`openai_compat.py` 357→367）。实测同一问题 input_tokens 9→991、模型正确点名 5 个工具；问"读 README"返回 `read_file` 的 `tool_calls`（`stop_reason=tool_use`）且 `note` 提示未执行。`Completion` 新增 `reasoning` 字段，`decode_response` 认 `reasoning_content`/`reasoning`，日志新增 `[think]` 行，`ChatResponse` 新增 `reasoning`。顺手修掉 `.env` 里 `eebcafAGENTLAB_MODEL=` 的误粘贴前缀（此前 model 配置实际未生效，只是恰好等于默认值） |
+| 2026-11-25 | **`/chat` 带上工具 + 思考入日志**：`complete(messages, tools=registry.definitions())`（`main.py` 295→322 行、`types.py` 269→278、`openai_compat.py` 357→367）。实测同一问题 input_tokens 9→991、模型正确点名 5 个工具；问"读 README"返回 `read_file` 的 `tool_calls`（`stop_reason=tool_use`）且 `note` 提示未执行。`Completion` 新增 `reasoning` 字段，`decode_response` 认 `reasoning_content`/`reasoning`，日志新增 `[think]` 行，`ChatResponse` 新增 `reasoning`。顺手修掉 `.env` 里 `eebcafAGENTLAB_MODEL=` 的误粘贴前缀（此前 model 配置实际未生效，只是恰好等于默认值） |
 | 2026-11-25 | 新增根目录 `serve.sh`：后台启动 + 按启动时间生成日志文件（`log/YYYY-MM-DD_HH-MM-SS.log`），`log/` 进 `.gitignore`。实测两次启动生成 `17-43-32.log` 与 `17-43-38.log`，各自独立；启动失败时脚本打印日志末尾并非零退出 |
 | 2026-11-24 | **工具接进服务**（`main.py` 240→295 行）：`lifespan` 里建 `ToolRegistry()` 并用 `make_file_tools(Path.cwd())` 注册 5 个工具，挂 `app.state.registry`；新增 `GET /tools`（`response_model=list[ToolDefinition]`，复用 dataclass 不立镜像类）；`/health` 加 `tools` 计数；`_setup_logging()` 改为幂等（`--reload` 子进程的 lifespan 也会装 handler）。实测启动日志打印"工作区 + 5 个工具名"，`/tools` 返回 5 项完整 Schema，`/chat` 829ms 正常，`openapi.json` 里三个路径都在 |
 | 2026-11-26 | **命名清理**：logger 统一到模块导入路径（`agentlab.main` / `agentlab.loop` / `agentlab.tools`），修掉 `myagent` / `myagent.tools` 不在 `agentlab` 层级下、一旦加日志就绕过 handler 的隐患；`Agent` / `AgentResult` 字段与循环内变量改为 `system_prompt` / `last_llm_text` / `total_usage` / `tool_calls` / `tool_results`；`[chat]` 日志键 `q=` → `user=` |
@@ -822,6 +873,8 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `buil
 | 2026-11-27 | **重构：删掉 `agentlab/policy.py`，路径规则并进 `fs.py`（`PathRules`）**（`fs.py` 536→611 行，`registry.py` 245→231 行，`main.py` 384 行不改结构）。起于设计讨论：`policy.py` 自称"策略中枢"，实际只是路径黑名单，却被迫承担三层不同的事（禁工具、猜 `path` 参数、规范化路径），而规范化需要工作区根、它拿不到 → 只能比原始串。实测确认漏洞：`read_file docs/../log/a.log` 返回放行，而 `resolve()` 折叠后就是 `log/a.log`，文件真能读到。现在只有一个执行点：`_Workspace.resolve()` 拦完越界紧接着 `_check()` 查规则，5 个工具的 6 处路径入口全走它；遍历仍走 `files()`/`denied()`，两条路共用 `PathRules.hits`。`registry` 删掉 `Guard` 钩子与第 4 道守门（七道→六道）。验证：规则层 9 条判断、工具层 10 个调用（含 3 种 `..` 变体全被拒、写 `log/` 未创建文件、越界仍由第一层拦）；真实服务里模型读 `.env` 被拒并如实回报，grep 全仓搜 `AGENTLAB_API_KEY` 的 8 处命中全是文档与代码里的变量名 |
 | 2026-11-27 | **撤掉权限层，`policy.py` → `PathRules` → 无**（`fs.py` 611→518 行、`registry.py` 233 行、`main.py` 384→378 行、`policy.py` 删除）。上一轮刚把 `policy.py` 压成 `fs.PathRules` 并封了 `..` 绕过，但用户仍判定设计不对——理由成立：它本质是 30 行字符串匹配，却被摆成"策略中枢"，为此背了 `denied_tools`（零使用）、`path_arg` 猜测（加 `shell` 即静默失效）、路径规范化（拿不到 `root`，只能做一半）三件不属于一层的事；且目标形态改为 CLI 后，硬隔离让位于可解释的审批。现在 `_Workspace` 只保留越界检查（明确注释为"功能边界，不是权限边界"），`make_file_tools(root)` 不再收规则，registry 六道守门不含权限，启动日志不再打印禁止路径。验证：`.env` 与 `log/` 恢复可读可搜（预期，非回归），越界读写仍被拦且文件未被创建；服务重启 + 真实请求 `read_file README.md` 正常。已知问题里两条暴露面标回未解决 |
 | 2026-11-27 | **删除 Web 前后端，只保留 CLI 形态**（`main.py` 378 行、`frontend/index.html` 约 14 KB、`serve.sh` 全删；`pyproject.toml` 去掉 `fastapi` / `uvicorn`，mypy `files` 只剩 `agentlab`）。理由：目标改为本地单用户 work agent 后，HTTP 的三个卖点（远程访问、多会话复用、`/docs` 交互页）都不再需要，而代价是真的——多一层传输就多一套错误码、日志分诊和前端状态，而审批在终端里只是一个 `input()`。删后仓库暂无入口，验证改为 20 行脚本直调 `Agent.run()`（实测“读 README 前 5 行并概括”→ `steps=2`、in 2251 / out 106）；期间踩到 `load_dotenv()` 在 stdin 脚本里 `find_dotenv()` 断言失败的坑，改为显式 `.env` 路径 |
+| 2026-11-27 | **新增 `agentlab/cli.py`（322 行）：终端客户端，`agentlab` 命令可用**。REPL（一个进程一个会话、历史在内存）+ 一次性模式（`agentlab "任务"`）；回答用 `rich.Markdown`，轨迹一行一个工具调用（按 `user` 消息切本轮，不按长度），末尾一行账（步数 / in / out / 缓存 / 耗时 / 模型）；`-C` 换工作区根（不改进程 cwd）、`--max-steps`、`--model`、`-v` 打开 `[loop]`/`[think]` 日志。每个任务重建 `AsyncClient`：`asyncio.run` 每次新建 loop，换来 Ctrl-C 干净中断。实测：一次性模式 `steps=2`、多轮记住 `42`、`--max-steps 1` / 缺 key / 工作区不存在三条错误路径均无 traceback。另外发现模型会自作主张写 `MEMORY.md`，默认 system prompt 补了"不要新建记忆/笔记文件" |
+| 2026-11-27 | **新增 `agentlab/events.py`：run 过程事件，边跑边说**（`loop.py` +58 行、`cli.py` +41/-25 行、`events.py` 约 150 行）。四个事件 `StepStarted` / `AssistantReplied` / `ToolCallStarted` / `ToolCallFinished`，`type` 分别是 `step_start` / `assistant_reply` / `tool_call` / `tool_result`；字段只有标量与 `Usage`，为 4.14 R4 的 JSONL 落盘留好形状。`Agent.run(..., on_event=)` 逐个发出；`_emit` 吞掉订阅者异常只记日志（画不出来不该丢结果）。CLI 侧 `_stream_handler` 边跑边画：`· 第 N 步` / `↳ 工具 参数` / `✓ 工具 · 94 字符`，收尾 `_render` 只留回答与账，`_trail` 删除（否则轨迹会被打两遍）。两条取舍：工具结果只发 `chars` 不发正文（正文已在轨迹与会话，两个真相必然对不上）；不做逐 token 流式（要动 `LLMClient.complete` 返回类型）。验证：真实任务输出 `· 第 1 步 / ↳ read_file {...} / ✓ read_file · 94 字符 / · 第 2 步 / 回答 / 2 步 · in 2450`；REPL 两轮仍接得上历史（首轮 in 2442，第二句 in 1335）；ruff + mypy 15 文件全绿 |
 
 ### 2026-11-18 的两条调整
 
@@ -849,7 +902,7 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `buil
 | 会话无鉴权 | 知道 `session_id` 就能接上别人的对话 | 单机自用可接受；对外开放前必须加身份校验 |
 | **工具能读到 `log/` 里的历史对话** | 实测模型为回答"我叫什么"去 `grep log/`，从别的会话日志里翻出了名字——等于绕过会话隔离 | ⚠️ 曾经用黑名单修过，现**已随权限层一起撤掉**（3.14）：当前不设防，重新设计前不要把含隐私的仓库交给它 |
 | **工具能读到 `.env` 里的凭据** | 找配置时模型会直接 `read_file .env`，真 key 会进 prompt、进日志 | ⚠️ 同上，随权限层撤掉而暴露。缓解：别在有真凭据的目录里跑，或先用 `.env` 外的方式注入 |
-| 长任务同步等待 | 现在没有入口，只能等 `Agent.run()` 整体返回，看不到中间过程 | CLI 用 `on_event` 实时渲染（M4）；HTTP 壳已删除，SSE 不做 |
+| 回答不是逐字出现的 | 过程能看见了，但模型正文仍整包返回，长回答要等完才一次性出现 | 逐 token 流式要改 `LLMClient.complete` 的返回类型与 `loop` 的拼装，属于独立一件事，先不做 |
 | 工具结果会撑爆上下文 | 读大文件后 input tokens 快速上涨（实测单任务已 2200+，会话续聊后还会叠加） | `context.py` 压缩早期工具结果（M4 剩余项） |
 | 每次验证都花一次真实调用 | 调试时频繁重启 + curl 会累积费用 | 已确认接受；请求都极短，成本以分计 |
 | Python 3.14 较新 | 个别第三方库可能没有适配 | 目前依赖均正常 |
@@ -870,39 +923,18 @@ pip install -e ".[dev]"
 cp .env.example .env          # 填入 AGENTLAB_API_KEY
 ```
 
-**当前没有入口脚本**：Web 壳已删除，`agentlab` 命令（`agentlab/cli.py`）是 M4 的最后一项。
-在那之前，跑一条真实任务用这段脚本（已实测：`steps=2`、in 2251 / out 106）：
+装好后 `agentlab` 就在 PATH 里（console script，入口 `agentlab.cli:main`）。
 
 ```bash
-python - <<'PY'
-import asyncio
-from dotenv import load_dotenv
-from agentlab import Agent
-from agentlab.llm.openai_compat import OpenAIClient
-from agentlab.tools.builtin.fs import make_file_tools
-from agentlab.tools.registry import ToolRegistry
-
-load_dotenv(".env")          # 显式路径：从 stdin 运行时 find_dotenv() 找不到调用栈
-
-async def main() -> None:
-    client = OpenAIClient.from_env()
-    registry = ToolRegistry()
-    for tool in make_file_tools("."):
-        registry.register(tool)
-    try:
-        result = await Agent(client=client, registry=registry).run(
-            "读一下 README.md 的前 5 行，用一句话概括"
-        )
-    finally:
-        await client.aclose()
-    print(result.last_llm_text)
-    print(f"steps={result.steps} in={result.usage.input_tokens} out={result.usage.output_tokens}")
-
-asyncio.run(main())
-PY
+agentlab                                   # 交互模式：一个进程一个会话，历史在内存里
+agentlab "把 README 前 3 行概括一下"         # 一次性模式：跑完就退出
+agentlab -C ~/Downloads "整理这个月的发票"    # 换工作区根；不改你的 cwd
+agentlab --max-steps 20 -v "重构 fs.py"      # 放宽步数 + 打开 [loop]/[think] 日志
 ```
 
-`Agent` 不往 stdout 写任何东西：流式碎片、`[think]` 截断、工具往返都在 `logging` 里（默认 stderr），
-所以上面这段的 stdout 只有两行，适合直接喂给 `jq` 或别的脚本。
+交互里 `:help` 看命令、`:reset` 清历史、`:q` 退出、Ctrl-C 只中断当前任务。
+stdout 上只有回答、轨迹、账；`-v` 的日志全在 stderr，重定向时不会混进结果。
+凭据照旧从 `.env` 读：`AGENTLAB_API_KEY` / `AGENTLAB_BASE_URL` / `AGENTLAB_MODEL`。
 
-> 注：当前还没有可执行的 CLI。`cli.py` 完成后才能直接 `agentlab "你的任务"`。
+`Agent` 不往 stdout 写任何东西：`[think]` 截断、工具往返、token 账都在 `logging` 里（默认 stderr），
+stdout 只有回答 + 轨迹 + 一行汇总，重定向到文件时干净。
