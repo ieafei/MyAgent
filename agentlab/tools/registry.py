@@ -12,6 +12,13 @@ base.py 只定了工具的**形状**，这个文件补上**从"模型说"到"真
 前五道失败**都不抛异常**，一律转成 ToolResult(is_error=True) 回给模型：
 参数写错是模型能自己改的事，抛异常穿透主循环等于剥夺它自救的机会。
 
+**这里不做权限判断，当前也没有权限层。** 曾经在这里挂过一个 `guard` 钩子，
+它只拿得到 `(工具名, 原始参数串)`：要判"该不该执行"，就得猜哪个参数是路径
+（加 `shell` / `http` 那天静默失效），还要自己规范化路径（`docs/../log/a.log`
+折叠前前缀是 `docs/`，直接绕过）。既然两件事都做不干净，就撤掉了——
+等 CLI 的交互审批落地，再决定它该长什么样（大概率是工具里的 `await approve(...)`，
+而不是 registry 上的回调）。
+
 这个文件不 import 具体工具，也不知道有哪些工具 —— 它只认 Tool 协议。
 于是它可以用一个假工具（echo）完整测通，不需要文件系统、不需要网络。
 """
@@ -155,6 +162,7 @@ class ToolRegistry:
             return ToolResult.fail(problem)
 
         # 4) 执行 + 超时 + 5) 兜异常：三类结果分开，责任归属才看得清。
+        #    权限判断不在这里，见文件开头：需要审批时由工具自己 await，不经过 registry。
         try:
             result = await asyncio.wait_for(tool.run(args), timeout=self._timeout_s)
         except ToolError as exc:

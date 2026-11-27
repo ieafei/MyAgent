@@ -9,15 +9,15 @@
 
 | 项 | 值 |
 |---|---|
-| 当前阶段 | **M4 进行中**：M3 主循环 ✅、M4 `session.py` ✅、`context.py` ✅——会话能续聊，超预算时先压早期工具结果；下一步补齐 `/chat/stream`（长任务边说边跑）与 `policy.py`（工具权限） |
-| 已完成文件 | `agentlab/` 下 13 个（`__init__`、`types`、`loop`、`session`、`context`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（服务入口）+ `frontend/index.html`（对话测试页） |
-| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置与工具数，`/tools` 列出 5 个已注册文件工具（与发给模型的是同一份 Schema）。**`/chat` 已是完整 agent 任务**：模型要工具就并行执行、结果回填、再问一轮，直到它给出最终回答；实测"读 README 并概括"自动跑 2 轮（`steps=2`），读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽返回 500 `StepLimitError`。**带 `session_id` 时可跨请求续聊**：同 id 第二句能接上第一句（实测 `hist=2`、答出上一轮给的名字），不同 id / 不传 id 各自从零开始；同会话并发请求被 `asyncio.Lock` 串行化。模型 `deepseek-flash` 的思考逐轮写进 `[think]` 日志行与响应 `reasoning` 字段（是否返回由服务端决定，工具轮次时有时无）。`/docs` 点按钮可用，**`/` 打开网页版对话测试台** |
+| 当前阶段 | **M4 进行中，目标形态已定为 CLI**：M3 主循环 ✅、M4 `session.py` ✅ / `context.py` ✅；权限层已整个撤掉（`policy.py` → `PathRules` → 无，见 3.14），`.env` / `log/` 目前不设防，等 `cli.py` 的审批回路一起重新设计；下一步 `cli.py`（终端客户端，Codex 形态：一个进程一个会话，agent 常驻），SSE 不再做 |
+| 已完成文件 | `agentlab/` 下 13 个（`__init__`、`types`、`loop`、`session`、`context`、`llm/` 3 个、`tools/` 3 个、`tools/builtin/` 2 个）+ 根目录 `main.py`（调试壳）+ `frontend/index.html`（对话测试页） |
+| 可运行能力 | `python main.py` 起 HTTP 服务：`/health` 报配置与工具数，`/tools` 列出 5 个已注册文件工具（与发给模型的是同一份 Schema）。**工具调用受策略约束**：`.env` / `.env.*` / `log/` / `secrets/` / `*.pem` / `*.key` 默认拒绝，点名访问返回"策略禁止"、遍历时直接跳过（实测让模型读 `.env`，它收到拒绝并如实回报，凭据没有进 prompt）。**`/chat` 已是完整 agent 任务**：模型要工具就并行执行、结果回填、再问一轮，直到它给出最终回答；实测"读 README 并概括"自动跑 2 轮（`steps=2`），读不存在的文件时会自己改用 `list_files` 并如实报告；`max_steps` 用尽返回 500 `StepLimitError`。**带 `session_id` 时可跨请求续聊**：同 id 第二句能接上第一句（实测 `hist=2`、答出上一轮给的名字），不同 id / 不传 id 各自从零开始；同会话并发请求被 `asyncio.Lock` 串行化。模型 `deepseek-flash` 的思考逐轮写进 `[think]` 日志行与响应 `reasoning` 字段（是否返回由服务端决定，工具轮次时有时无）。`/docs` 点按钮可用，**`/` 打开网页版对话测试台** |
 | 测试 | 无 pytest 用例（4 个集成测试已按决定删除）；验证方式改为"重启服务 + 网页/curl"，纯逻辑文件用 `/tmp` 脚本跑真实输出 |
-| 代码规模 | 源码约 2300 行（types 278 / llm 585 / tools 435 / builtin 518 / loop 174 / session 137 / context 162 / 包入口 7）+ `main.py` 378 行 + `frontend/index.html` 约 14 KB |
+| 代码规模 | 源码约 2312 行（types 278 / llm 585 / tools 442 / builtin 527 / loop 174 / session 137 / context 162 / 包入口 7）+ `main.py` 378 行 + `frontend/index.html` 约 14 KB |
 | 运行环境 | WSL2 Ubuntu 24.04 · Python 3.14.4 · uv 0.13.9 · venv |
 | 依赖状态 | 已安装（httpx / rich / jsonschema / python-dotenv / fastapi / uvicorn / ruff / mypy / types-jsonschema；`pytest` 仍在 dev extras 里，仓库暂无测试文件） |
 
-一句话：**`/chat` 已经是能自己调工具、能记住上下文聊下去、并且发送前会按预算压缩历史的 agent——同一个 `session_id` 的第二句能接上第一句，历史超预算时优先压早期工具结果而不是粗暴截断；下一步让它边跑边说（SSE）。**
+一句话：**`/chat` 已经是能自己调工具、能记住上下文、发送前按预算压缩历史、并且会拒绝越权访问的 agent——同一个 `session_id` 的第二句能接上第一句，`.env` 与 `log/` 既读不到也扫不到；下一步让它边跑边说（SSE）。**
 
 ---
 
@@ -41,10 +41,10 @@ MyAgent/
 │   └── tools/              ← 工具层
 │       ├── __init__.py     ← ✅ 只导出协议层
 │       ├── base.py         ← ✅ Tool / ToolResult / 截断（188 行）
-│       ├── registry.py     ← ✅ 注册表：查表/校验/超时/兜异常/截断（226 行）
+│       ├── registry.py     ← ✅ 注册表：查表/解析/校验/超时/兜异常/截断（233 行）
 │       └── builtin/        ← ✅ 内置工具
 │           ├── __init__.py ← ✅ 不 re-export（工具必须显式构造）
-│           └── fs.py       ← ✅ 5 个文件工具 + 工作区越界检查（509 行）
+│           └── fs.py       ← ✅ 5 个文件工具 + 工作区越界检查（518 行，无权限层）
 ├── docs/
 │   ├── goal-and-design.md  ← 目标与实现方式
 │   ├── working-agreement.md← 协作约定（怎么写、怎么讲）
@@ -493,7 +493,7 @@ hist=7 text='好'
 hist=0 text='阿飞'
 ```
 
-`hist` 是 0 与 7 而不是两个 0，说明第二个请求等到第一个写完才读历史。**注意**："hist=0 却答出阿飞"不是会话串了——模型自己 `grep` 了 `log/` 目录，从历史日志里读到的（见第 7 节已知问题）。
+`hist` 是 0 与 7 而不是两个 0，说明第二个请求等到第一个写完才读历史。**注意**："hist=0 却答出阿飞"不是会话串了——模型自己 `grep` 了 `log/` 目录，从历史日志里读到的（这正是 3.14 记的问题：权限层撤掉后，它重新变为未解决，见第 7 节）。
 
 故意没做：**不落盘**（重启即丢）、**条数上限不是 token 上限**（精确预算留给 `context.py`）、**无鉴权**（猜到 id 就能接上）。淘汰会话时只淘汰空闲的，全在跑就宁可暂时超限。
 
@@ -682,6 +682,52 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 
 故意没做：**不摘要**（把早期对话折叠成一段总结要多一次模型调用，留到以后）、**不按模型窗口自适应**（24k 是固定值）、**单轮内不压缩**（只在任务入口压，任务中途工具结果继续增长）。
 
+### 3.14 权限层：已撤掉，等待重新设计
+
+这一节记录的不是一个功能，而是一次**撤回**——以及为什么撤。
+
+**做了什么**：曾经有过 `agentlab/policy.py`（117 行），后来压成 `fs.py` 里的 `PathRules`，
+再后来整个删掉。默认黑名单是 `.env` / `.env.*` / `log/` / `secrets/` / `*.pem` / `*.key`，
+读写遍历全挡，且实测能挡住 `read_file docs/../log/a.log` 这类 `..` 绕过。
+
+**为什么撤**：
+
+1. **层级错位**。它自称"策略"，实际是一个 30 行的路径匹配函数。为了显得像个中枢，
+   它被迫背了三种不同层级的东西：禁整个工具（`denied_tools`）、猜哪个参数是路径
+   （`path_arg="path"`）、把路径规范成可比较形式（需要 `root`，它拿不到）。
+2. **猜参数会静默失效**。`args.get("path", ".")` 对 5 个 fs 工具成立，加 `shell`
+   （参数叫 `command`）那天拿到 `"."`，返回"放行"——不报错、不日志、测试发现不了。
+3. **规范化它做不了**。`docs/../log/a.log` 折叠前前缀是 `docs/`，前缀规则不命中；
+   折叠只有 `_Workspace` 能做（它知道 `root`）。这一点逼出了"强制点必须跟着真实路径走"，
+   也顺便证明了这个模块站错了层。
+4. **部署形态变了**。目标已经定为 Codex CLI 那样的客户端：一个进程、一个会话、用户就在键盘前。
+   这时候"硬隔离"不是最要紧的，**可解释的审批**才是——模型要读 `.env` 时问一句
+   "允许吗？"，比一份谁也不知道的黑名单更符合这个形态。
+
+**现在的状态**：`_Workspace` 只保留越界检查（`resolve()` 之后必须在根目录内，
+软链接逃逸也拦）。这是**功能边界**，不是权限边界——它回答"这个路径指的文件在不在工作区里"，
+不回答"该不该让模型碰"。没有黑名单，没有 `guard` 钩子，registry 六道守门里也没有权限这层。
+
+**撤掉的代价，说清楚**：
+
+- 模型会再读到 `.env`（真凭据会进 prompt、进日志）；
+- 会再 `grep log/` 读到别的会话的对话——即下面第 7 节那条已知问题重新变为未解决。
+
+这两个都是真实的暴露面，不是理论风险。之所以现在能接受：工作区就是本机自己的仓库，
+且这版只在本人机器上跑；一旦要给别人用（或接 MCP / 远程工具），这条必须补上。
+
+**重新设计时的方向**（讨论过，未定）：
+
+- 审批挂在**工具自己**身上：`await self._ws.approve("read_file", path)`，
+  回调由 CLI 注入（读 stdin），库只负责 `await`。工具 `run()` 本来就是 async，不用改 registry。
+- 规则形态先只想清一件事：是"禁止列表"（黑名单）还是"只读沙箱"（`--sandbox read-only`
+  那种 allow 模式）。两者语义不同，混在一起就是下一个 `path_arg`。
+- 如果将来真需要"禁整个工具"，再加一个只认工具名的 registry 钩子——那个是干净的，
+  因为它不需要猜参数，也不需要规范化路径。
+
+教训一句话：**一个东西如果只是"字符串匹配"，就别给它起一个暗示"决策中心"的名字。**
+名字和能力的落差，比代码本身难看得多。
+
 ---
 
 ## 4. 尚未开始
@@ -691,17 +737,17 @@ src/ → src/app.py → big.txt → binary.bin → evil.txt → README.md   共 
 | M1 | `llm/openai_compat.py` 真实 HTTP 适配器 | ✅ 真实请求已验证（经 `/chat` 实测） |
 | M2 | `tools/` 工具系统 + 文件工具 | ✅ 完成：`base.py` / `registry.py` / `builtin/fs.py`，已接进 `main.py`（`/tools` 可查） |
 | M3 | `loop.py` 主循环 | ✅ 完成：`Agent.run()` 调模型 → 执行工具 → 回填 → 再调，`/chat` 已接（返回 `steps`） |
-| M4 | 会话 / 流式 / 上下文 / 权限 / CLI | 🚧 `session.py` ✅、`context.py` ✅；剩 `/chat/stream`、`policy.py`、`cli.py` |
+| M4 | 会话 / 上下文 / CLI（权限层待重新设计） | 🚧 `session.py` ✅、`context.py` ✅；权限层已撤（3.14），剩 `cli.py`（SSE 已废弃，改为 CLI 事件渲染） |
 | M5 | 测试、评测、可观测性 | ⬜ |
 
 ---
 
 ## 5. 下一步：流式与上下文（M4 剩余）
 
-已完成：M3 的 `Agent.run()` 主循环，M4 的 `session.py`（`/chat` 带 `session_id` 就能续聊，历史按会话存、成对裁剪、每会话一把锁，见 3.9）与 `context.py`（发送前按 token 预算压历史，见 3.13）。剩下：
+已完成：M3 的 `Agent.run()` 主循环，M4 的 `session.py`（`/chat` 带 `session_id` 就能续聊，历史按会话存、成对裁剪、每会话一把锁，见 3.9）、`context.py`（发送前按 token 预算压历史，见 3.13）。权限层做完又撤了，原因与重新设计的方向见 3.14。剩下：
 
-1. `/chat/stream`：SSE 把每轮的 `[loop]`、工具调用、最终回答推给前端；现在同步接口在长任务上会长时间没有响应。前提是给 `Agent.run()` 加 `on_event` 钩子。
-2. `policy.py`：工具级权限（工作区白名单、写入确认、"哪些目录不许读"）。这一条已经有现实理由——实测模型为了回答"我叫什么"会去 `grep log/`，从历史日志里翻出别人的对话（见第 7 节）。
+1. `cli.py`：终端客户端（`agentlab` 入口已在 `pyproject.toml` 声明，文件还没写）。**目标形态已确定为 Codex CLI 那样**：一个进程 = 一个会话 = 一个常驻 `Agent`，历史在进程内，下一步不再是 SSE。
+2. `Agent.run()` 的 `on_event` 钩子：CLI 要边跑边说（工具调用、结果、最终回答），这比 SSE 简单——没有网络、没有事件 schema，回调直接打印。
 
 工具侧遗留口子（现在已经真会执行，风险从"潜在"变"现实"）：
 
@@ -768,6 +814,9 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `buil
 | 2026-11-26 | **命名清理**：logger 统一到模块导入路径（`agentlab.main` / `agentlab.loop` / `agentlab.tools`），修掉 `myagent` / `myagent.tools` 不在 `agentlab` 层级下、一旦加日志就绕过 handler 的隐患；`Agent` / `AgentResult` 字段与循环内变量改为 `system_prompt` / `last_llm_text` / `total_usage` / `tool_calls` / `tool_results`；`[chat]` 日志键 `q=` → `user=` |
 | 2026-11-26 | **新增 `agentlab/session.py`（125 行）：会话**（`main.py` 325→378 行、`loop.py` 143→155 行、前端约 14 KB）。`SessionStore` 按 `session_id` 存历史；`Session.trim()` 保证 `system` 不丢、`assistant(tool_calls)` 与其 `tool` 结果成对丢弃；每会话一把 `asyncio.Lock` 罩住"读历史 → 跑任务 → 写回"。`Agent.run()` 加 `history` 参数；`/chat` 新增 `session_id` / `history_messages`，续聊时不再重复传 `system`（首轮定）。实测：同 id 第二句 `hist=2` 答出上一轮的名字、不同 id 说不知道；裁剪 37→10 条且零孤立 `tool`；并发两请求 `hist` 为 0 与 7 而非两个 0。发现新问题：模型会 `grep log/` 读别的会话日志，已记入已知问题（`policy.py` 处理） |
 | 2026-11-26 | **新增 `agentlab/context.py`（162 行）：上下文预算**（`loop.py` 155→174 行，`Agent` 加 `max_context_tokens` 默认 24k）。`fit()` 两级处理：先压缩早期 `tool` 结果内容（保留 `tool_call_id` 配对，追加"原文 N 字符"说明），仍超预算再成对丢消息；`system` 与最近 `keep_recent` 条永不牺牲。token 按 2 字符 ≈ 1 粗估，定位是闸门不是账本。修掉一个自测发现的 bug：尾部边界跟着删除一起左移，会把保留区吃光只剩 `system`。实测 60696→8098 tokens、61→10 条，配对完整、入参不被修改；`/chat` 会话回归正常 |
+| 2026-11-27 | **新增 `agentlab/policy.py`（117 行）：工具权限**（`registry.py` 226→245 行，加 `guard` 钩子与第 4 道守门；`fs.py` 509→536 行，`_Workspace` 收 `deny` 回调、遍历跳过；`main.py` 378→384 行装配）。默认拒绝 `.env` / `.env.*` / `log/` / `secrets/` / `*.pem` / `*.key`。两层同规则：registry 挡"点名要"，工作区 `files()` 与 `_walk()` 挡"遍历扫到"——只做一层会漏。拒绝走 `ToolResult(is_error=True)`，模型能看到理由换条路。自测发现只挡直连、`grep` 仍能扫出 `.env` 与 `log/`，补上遍历层后修复。实测 10 条规则判断 + 6 个工具调用全对；真实服务里让模型读 `.env`，它收到"策略禁止访问"并如实回报，凭据未进 prompt。第 7 节"模型读 `log/`"标记为已修 |
+| 2026-11-27 | **重构：删掉 `agentlab/policy.py`，路径规则并进 `fs.py`（`PathRules`）**（`fs.py` 536→611 行，`registry.py` 245→231 行，`main.py` 384 行不改结构）。起于设计讨论：`policy.py` 自称"策略中枢"，实际只是路径黑名单，却被迫承担三层不同的事（禁工具、猜 `path` 参数、规范化路径），而规范化需要工作区根、它拿不到 → 只能比原始串。实测确认漏洞：`read_file docs/../log/a.log` 返回放行，而 `resolve()` 折叠后就是 `log/a.log`，文件真能读到。现在只有一个执行点：`_Workspace.resolve()` 拦完越界紧接着 `_check()` 查规则，5 个工具的 6 处路径入口全走它；遍历仍走 `files()`/`denied()`，两条路共用 `PathRules.hits`。`registry` 删掉 `Guard` 钩子与第 4 道守门（七道→六道）。验证：规则层 9 条判断、工具层 10 个调用（含 3 种 `..` 变体全被拒、写 `log/` 未创建文件、越界仍由第一层拦）；真实服务里模型读 `.env` 被拒并如实回报，grep 全仓搜 `AGENTLAB_API_KEY` 的 8 处命中全是文档与代码里的变量名 |
+| 2026-11-27 | **撤掉权限层，`policy.py` → `PathRules` → 无**（`fs.py` 611→518 行、`registry.py` 233 行、`main.py` 384→378 行、`policy.py` 删除）。上一轮刚把 `policy.py` 压成 `fs.PathRules` 并封了 `..` 绕过，但用户仍判定设计不对——理由成立：它本质是 30 行字符串匹配，却被摆成"策略中枢"，为此背了 `denied_tools`（零使用）、`path_arg` 猜测（加 `shell` 即静默失效）、路径规范化（拿不到 `root`，只能做一半）三件不属于一层的事；且目标形态改为 CLI 后，硬隔离让位于可解释的审批。现在 `_Workspace` 只保留越界检查（明确注释为"功能边界，不是权限边界"），`make_file_tools(root)` 不再收规则，registry 六道守门不含权限，启动日志不再打印禁止路径。验证：`.env` 与 `log/` 恢复可读可搜（预期，非回归），越界读写仍被拦且文件未被创建；服务重启 + 真实请求 `read_file README.md` 正常。已知问题里两条暴露面标回未解决 |
 
 ### 2026-11-18 的两条调整
 
@@ -793,7 +842,8 @@ M2 进展：`tools/base.py` ✅（3.6）→ `registry.py` ✅（3.11）→ `buil
 | 没有自动化测试 | 重构时缺回归保护，改坏不会立刻报警 | 刻意如此（M5 再补）；当前每步都现场跑真实请求验证 |
 | 会话不持久 | 进程重启后所有会话清空；上限 100 个会话、每会话 60 条消息（按条数不按 token） | 有意的第一版取舍；落盘与 token 预算分别留给后续版本与 `context.py` |
 | 会话无鉴权 | 知道 `session_id` 就能接上别人的对话 | 单机自用可接受；对外开放前必须加身份校验 |
-| **工具能读到 `log/` 里的历史对话** | 实测模型为回答"我叫什么"去 `grep log/`，从别的会话日志里翻出了名字——等于绕过会话隔离 | 需要 `policy.py` 做目录黑名单（M4 剩余项）；当前靠"只在可信目录跑" |
+| **工具能读到 `log/` 里的历史对话** | 实测模型为回答"我叫什么"去 `grep log/`，从别的会话日志里翻出了名字——等于绕过会话隔离 | ⚠️ 曾经用黑名单修过，现**已随权限层一起撤掉**（3.14）：当前不设防，重新设计前不要把含隐私的仓库交给它 |
+| **工具能读到 `.env` 里的凭据** | 找配置时模型会直接 `read_file .env`，真 key 会进 prompt、进日志 | ⚠️ 同上，随权限层撤掉而暴露。缓解：别在有真凭据的目录里跑，或先用 `.env` 外的方式注入 |
 | 长任务同步等待 | 多轮工具调用期间前端无输出，直到最终回答 | `/chat/stream`（SSE）把每轮进度推出去（M4 剩余项） |
 | 工具结果会撑爆上下文 | 读大文件后 input tokens 快速上涨（实测单任务已 2200+，会话续聊后还会叠加） | `context.py` 压缩早期工具结果（M4 剩余项） |
 | 每次验证都花一次真实调用 | 调试时频繁重启 + curl 会累积费用 | 已确认接受；请求都极短，成本以分计 |
